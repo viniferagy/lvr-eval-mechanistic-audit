@@ -6,7 +6,7 @@ pipeline/model_utils.py
 为支持 BF-3(logit lens)与 PF-3(attention KL),加载时:
   - 通过 adapter 加载模型并设置 attn_implementation="eager"
   - 缓存 final_norm / lm_head      (BF-3 logit lens 用)
-  - 缓存 image_pad_id              (latent span 定位用)
+  - 缓存 image_pad_id              (adapter image span 定位用)
 
 上层(ablation / degradation / internal_metrics)只跟 VLMWrapper 打交道。
 """

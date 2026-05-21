@@ -31,6 +31,42 @@ from .metrics import resolve_readout
 logger = logging.getLogger("lvr_eval.degradation")
 
 
+def _empty_span_stats() -> dict:
+    return {"n_total": 0, "n_success": 0, "n_skipped": 0,
+            "skip_reasons": {}, "query_target_counts": {}, "examples": []}
+
+
+def _record_span_success(stats: dict, meta: dict):
+    stats["n_success"] += 1
+    kind = meta.get("query_target_kind", "unknown")
+    stats["query_target_counts"][kind] = stats["query_target_counts"].get(kind, 0) + 1
+    if len(stats["examples"]) < 5:
+        stats["examples"].append({
+            "query_target_kind": kind,
+            "query_span": meta.get("query_span"),
+            "image_span": meta.get("image_span"),
+            "adapter_notes": meta.get("adapter_notes", {}),
+        })
+
+
+def _record_span_skip(stats: dict, reason: str):
+    stats["n_skipped"] += 1
+    stats["skip_reasons"][reason] = stats["skip_reasons"].get(reason, 0) + 1
+
+
+def _merge_span_stats(dst: dict, src: dict):
+    dst["n_total"] += src.get("n_total", 0)
+    dst["n_success"] += src.get("n_success", 0)
+    dst["n_skipped"] += src.get("n_skipped", 0)
+    for reason, count in src.get("skip_reasons", {}).items():
+        dst["skip_reasons"][reason] = dst["skip_reasons"].get(reason, 0) + count
+    for kind, count in src.get("query_target_counts", {}).items():
+        dst["query_target_counts"][kind] = dst["query_target_counts"].get(kind, 0) + count
+    remaining = max(0, 5 - len(dst["examples"]))
+    dst["examples"].extend(src.get("examples", [])[:remaining])
+    dst["valid_rate"] = dst["n_success"] / max(dst["n_total"], 1)
+
+
 # --------------------------------------------------------------------------- #
 #  曲线特征 (对“上升”与“下降”型都适用)
 # --------------------------------------------------------------------------- #
@@ -63,39 +99,50 @@ def curve_features(sev: list[float], y: list[float]) -> dict:
 #  单 severity 点
 # --------------------------------------------------------------------------- #
 def _metric_at_severity(wrapper, samples: list[ProbeSample], mode: str,
-                        severity: float, readout: str, cfg: dict) -> Optional[float]:
+                        severity: float, readout: str, cfg: dict) -> tuple[Optional[float], dict]:
     metric = resolve_readout(readout)
     readout_name = metric.legacy_name
+    span_stats = _empty_span_stats()
 
     if readout_name == "pf3":
-        pf3_curve = metric.require_curve()
         pf3_reduce = metric.require_reduce()
         seeds = cfg["pf3"]["num_seeds"]
         vals = []
         for s in samples:
+            span_stats["n_total"] += 1
             try:
-                c, _ = pf3_curve(wrapper, s.image, s.question,
-                                 corruption_mode=mode, num_seeds=seeds,
-                                 severity=(None if severity == 0 else severity))
-                if c is not None:
-                    vals.append(pf3_reduce(c)[metric.default_scalar])
+                meta = IM.pf3_curve_with_meta(
+                    wrapper, s.image, s.question,
+                    corruption_mode=mode, num_seeds=seeds,
+                    severity=severity,
+                )
+                if meta["curve"] is not None:
+                    vals.append(pf3_reduce(meta["curve"])[metric.default_scalar])
+                    _record_span_success(span_stats, meta)
+                else:
+                    _record_span_skip(span_stats, "pf3_no_valid_seed")
             except Exception as e:  # noqa: BLE001
+                _record_span_skip(span_stats, f"pf3:{type(e).__name__}")
                 logger.debug("pf3@sev fail: %s", e)
-        return float(np.mean(vals)) if vals else None
+        span_stats["valid_rate"] = span_stats["n_success"] / max(span_stats["n_total"], 1)
+        return (float(np.mean(vals)) if vals else None), span_stats
 
     elif readout_name == "bf3":
-        bf3_curve = metric.require_curve()
         bf3_reduce = metric.require_reduce()
         vals = []
         for s in samples:
+            span_stats["n_total"] += 1
             img = (s.image if severity == 0
                    else IM.corrupt_image(s.image, mode, seed=0, severity=severity))
             try:
-                c = bf3_curve(wrapper, img, s.question)
-                vals.append(bf3_reduce(c)["final_entropy"])
+                meta = IM.bf3_curve_with_meta(wrapper, img, s.question)
+                vals.append(bf3_reduce(meta["curve"])["final_entropy"])
+                _record_span_success(span_stats, meta)
             except Exception as e:  # noqa: BLE001
+                _record_span_skip(span_stats, f"bf3:{type(e).__name__}")
                 logger.debug("bf3@sev fail: %s", e)
-        return float(np.mean(vals)) if vals else None
+        span_stats["valid_rate"] = span_stats["n_success"] / max(span_stats["n_total"], 1)
+        return (float(np.mean(vals)) if vals else None), span_stats
     raise ValueError(f"unknown readout: {readout}")
 
 
@@ -112,12 +159,19 @@ def run_decay_sweep(wrapper, samples: list[ProbeSample],
     for fam, sev_list in cf2["families"].items():
         severities = [0.0] + list(sev_list)        # 0 = 干净基线
         ys = []
+        fam_span_stats = _empty_span_stats()
         for sev in severities:
-            val = _metric_at_severity(wrapper, samples, fam, sev, readout, cfg)
+            val, span_stats = _metric_at_severity(wrapper, samples, fam, sev, readout, cfg)
+            _merge_span_stats(fam_span_stats, span_stats)
             ys.append(val if val is not None else float("nan"))
             logger.info("[%s] CF-2 %s sev=%.3f %s=%.4f",
                         model_tag, fam, sev, readout_label, ys[-1])
         feats = curve_features(severities, ys)
-        out_fams[fam] = {"severities": severities, "curve": ys, "features": feats}
+        out_fams[fam] = {
+            "severities": severities,
+            "curve": ys,
+            "features": feats,
+            "span_metadata": fam_span_stats,
+        }
 
     return {"model": model_tag, "readout": readout_label, "families": out_fams}

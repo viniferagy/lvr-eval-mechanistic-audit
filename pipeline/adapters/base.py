@@ -7,6 +7,8 @@ from typing import Any, Protocol
 import torch
 import torch.nn as nn
 
+from .spans import AuditSpans
+
 
 @dataclass
 class ModelBundle:
@@ -28,7 +30,13 @@ class VLMAdapter(Protocol):
     def build_inputs(self, wrapper, image, question: str):
         """Build a single-sample model input object."""
 
+    def get_spans(self, wrapper, inputs, model_outputs=None) -> AuditSpans:
+        """Return audit-relevant token spans for one model input."""
+
     def generate(self, wrapper, images: list, prompts: list[str],
                  max_new_tokens: int = 64) -> list[str]:
         """Generate text outputs for optional output-level checks."""
 
+    def generate_with_trace(self, wrapper, image, question: str, **kwargs) -> dict:
+        """Optional generation trace hook for inference-time LVR audits."""
+        raise NotImplementedError

@@ -38,30 +38,41 @@ logger = logging.getLogger("lvr_eval.ablation")
 # --------------------------------------------------------------------------- #
 #  hook
 # --------------------------------------------------------------------------- #
-def _make_hook(mode: str, noise_std: float = 0.1):
+def _make_hook(mode: str, noise_std: float = 0.1, token_span=None):
     def hook(module, args, output):
         h = output[0] if isinstance(output, tuple) else output
         rest = output[1:] if isinstance(output, tuple) else None
+        target_slice = slice(None) if token_span is None else token_span.as_slice()
+        h_new = h.clone()
         if mode == "zero":
-            h_new = torch.zeros_like(h)
+            replacement = torch.zeros_like(h[:, target_slice, :])
         elif mode == "identity":
-            h_new = args[0]
+            replacement = args[0][:, target_slice, :]
         elif mode == "mean":
-            h_new = h.mean(dim=(0, 1), keepdim=True).expand_as(h).clone()
+            replacement = (
+                h[:, target_slice, :]
+                .mean(dim=(0, 1), keepdim=True)
+                .expand_as(h[:, target_slice, :])
+                .clone()
+            )
         elif mode == "noise":
-            h_new = h + torch.randn_like(h) * noise_std
+            replacement = h[:, target_slice, :] + torch.randn_like(h[:, target_slice, :]) * noise_std
         else:
             raise ValueError(f"未知 ablation mode: {mode}")
+        h_new[:, target_slice, :] = replacement
         return h_new if rest is None else (h_new,) + rest
     return hook
 
 
 @contextmanager
-def ablate_layer(wrapper, layer_idx: int, mode: str, noise_std: float = 0.1):
+def ablate_layer(wrapper, layer_idx: int, mode: str, noise_std: float = 0.1,
+                 token_span=None):
     """layer_idx<0 = 不消融(baseline)。"""
     handle = None
     if layer_idx >= 0:
-        handle = wrapper.layers[layer_idx].register_forward_hook(_make_hook(mode, noise_std))
+        handle = wrapper.layers[layer_idx].register_forward_hook(
+            _make_hook(mode, noise_std, token_span=token_span)
+        )
     try:
         yield
     finally:
@@ -87,18 +98,49 @@ def probe_internal(wrapper, samples: list[ProbeSample], cfg: dict) -> dict:
     pf3_reduce = pf3_metric.require_reduce()
 
     bf3_curves, pf3_curves = [], []
+    span_records = []
+    counters = {"n_total": 0, "n_success": 0, "n_skipped": 0,
+                "skip_reasons": {}, "query_target_counts": {}}
+
+    def record_success(meta: dict):
+        counters["n_success"] += 1
+        kind = meta.get("query_target_kind", "unknown")
+        counters["query_target_counts"][kind] = (
+            counters["query_target_counts"].get(kind, 0) + 1
+        )
+        span_records.append({
+            "query_target_kind": kind,
+            "query_span": meta.get("query_span"),
+            "image_span": meta.get("image_span"),
+            "adapter_notes": meta.get("adapter_notes", {}),
+        })
+
+    def record_skip(reason: str):
+        counters["n_skipped"] += 1
+        counters["skip_reasons"][reason] = counters["skip_reasons"].get(reason, 0) + 1
+
     for s in samples:
+        counters["n_total"] += 1
         if do_bf3:
             try:
-                bf3_curves.append(bf3_curve(wrapper, s.image, s.question))
+                from . import internal_metrics as IM
+
+                meta = IM.bf3_curve_with_meta(wrapper, s.image, s.question)
+                bf3_curves.append(meta["curve"])
+                record_success(meta)
             except Exception as e:  # noqa: BLE001
+                record_skip(f"bf3:{type(e).__name__}")
                 logger.debug("bf3 sample fail: %s", e)
         if do_pf3:
             try:
-                c, _ = pf3_curve(wrapper, s.image, s.question,
-                                 corruption_mode=pf3_mode, num_seeds=pf3_seeds)
-                if c is not None:
-                    pf3_curves.append(c)
+                from . import internal_metrics as IM
+
+                meta = IM.pf3_curve_with_meta(
+                    wrapper, s.image, s.question,
+                    corruption_mode=pf3_mode, num_seeds=pf3_seeds,
+                )
+                if meta["curve"] is not None:
+                    pf3_curves.append(meta["curve"])
             except Exception as e:  # noqa: BLE001
                 logger.debug("pf3 sample fail: %s", e)
 
@@ -111,6 +153,11 @@ def probe_internal(wrapper, samples: list[ProbeSample], cfg: dict) -> dict:
         m = np.mean(np.stack(pf3_curves), axis=0)
         out["pf3_curve"] = m.tolist()
         out["pf3"] = pf3_reduce(m)
+    out["span_metadata"] = {
+        **counters,
+        "valid_rate": counters["n_success"] / max(counters["n_total"], 1),
+        "examples": span_records[:5],
+    }
     return out
 
 
@@ -150,5 +197,131 @@ def run_ablation_sweep(wrapper, samples: list[ProbeSample],
 
     return {"model": model_tag, "mode": mode,
             "n_layers": wrapper.n_layers,
+            "ablation_target": "whole_layer_legacy",
             "bf3_scalar": bf3_key, "pf3_scalar": pf3_key,
             "baseline": baseline, "layers": results}
+
+
+@torch.no_grad()
+def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
+                                cfg: dict, model_tag: str) -> dict:
+    """Targeted BF-1 first pass: ablate adapter query span and read BF-3."""
+    from . import internal_metrics as IM
+
+    bf1 = cfg["bf1"]
+    mode = bf1["mode"]
+    noise_std = bf1.get("noise_std", 0.1)
+    bf3_key = bf1.get("bf3_scalar", "early_to_late_drop")
+    layer_ids = bf1.get("layers") or list(range(wrapper.n_layers))
+
+    prepared = []
+    skip_reasons: dict[str, int] = {}
+    query_target_counts: dict[str, int] = {}
+    for s in samples:
+        try:
+            inputs = wrapper.build_inputs(s.image, s.question)
+            out = wrapper.model(
+                **inputs,
+                output_hidden_states=True,
+                output_attentions=False,
+                return_dict=True,
+            )
+            spans = wrapper.adapter.get_spans(wrapper, inputs, out)
+            query_span = spans.preferred_query_span()
+            curve = IM.bf3_curve_from_inputs(wrapper, inputs, query_span, outputs=out)
+            meta = IM._span_payload(spans, query_span)  # internal JSON-safe helper
+            prepared.append({
+                "id": s.id,
+                "inputs": inputs,
+                "query_span": query_span,
+                "baseline_curve": curve,
+                "span_meta": meta,
+            })
+            kind = meta.get("query_target_kind", "unknown")
+            query_target_counts[kind] = query_target_counts.get(kind, 0) + 1
+        except Exception as exc:  # noqa: BLE001
+            reason = type(exc).__name__
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+            logger.debug("targeted bf1 prepare fail: %s", exc)
+
+    if prepared:
+        baseline_curve = np.mean(
+            np.stack([rec["baseline_curve"] for rec in prepared]),
+            axis=0,
+        )
+        baseline = {
+            "bf3_curve": baseline_curve.tolist(),
+            "bf3": IM.bf3_reduce(baseline_curve),
+            "span_metadata": {
+                "n_total": len(samples),
+                "n_success": len(prepared),
+                "n_skipped": len(samples) - len(prepared),
+                "skip_reasons": skip_reasons,
+                "query_target_counts": query_target_counts,
+                "valid_rate": len(prepared) / max(len(samples), 1),
+                "examples": [rec["span_meta"] for rec in prepared[:5]],
+            },
+        }
+    else:
+        baseline = {
+            "span_metadata": {
+                "n_total": len(samples),
+                "n_success": 0,
+                "n_skipped": len(samples),
+                "skip_reasons": skip_reasons,
+                "query_target_counts": query_target_counts,
+                "valid_rate": 0.0,
+                "examples": [],
+            },
+        }
+
+    results = []
+    for li in layer_ids:
+        curves = []
+        for rec in prepared:
+            try:
+                with ablate_layer(
+                    wrapper,
+                    li,
+                    mode,
+                    noise_std,
+                    token_span=rec["query_span"],
+                ):
+                    out = wrapper.model(
+                        **rec["inputs"],
+                        output_hidden_states=True,
+                        output_attentions=False,
+                        return_dict=True,
+                    )
+                curves.append(
+                    IM.bf3_curve_from_inputs(
+                        wrapper,
+                        rec["inputs"],
+                        rec["query_span"],
+                        outputs=out,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("targeted bf1 layer %s fail: %s", li, exc)
+
+        rec_out = {"layer": li, "bf3": None, "bf3_curve": None, "delta": {}}
+        if curves and baseline.get("bf3"):
+            m = np.mean(np.stack(curves), axis=0)
+            rec_out["bf3_curve"] = m.tolist()
+            rec_out["bf3"] = IM.bf3_reduce(m)
+            rec_out["delta"]["bf3"] = baseline["bf3"][bf3_key] - rec_out["bf3"][bf3_key]
+        results.append(rec_out)
+        logger.info("[%s] targeted layer %02d/%d Δbf3(%s)=%s",
+                    model_tag, li, wrapper.n_layers, bf3_key,
+                    rec_out["delta"].get("bf3"))
+
+    return {
+        "model": model_tag,
+        "mode": mode,
+        "n_layers": wrapper.n_layers,
+        "ablation_target": "adapter_preferred_query_span",
+        "readout": "bf3",
+        "bf3_scalar": bf3_key,
+        "baseline": baseline,
+        "layers": results,
+    }

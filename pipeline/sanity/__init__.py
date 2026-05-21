@@ -7,6 +7,7 @@ from .report import (
     run_sanity_suite,
     save_sanity_reports,
 )
+from .spans import check_span_metadata
 
 __all__ = [
     "has_failed_checks",
@@ -14,4 +15,5 @@ __all__ = [
     "run_sanity_for_metric_results",
     "run_sanity_suite",
     "save_sanity_reports",
+    "check_span_metadata",
 ]

@@ -11,7 +11,7 @@ models:
     path: "./models/Qwen/Qwen2___5-VL-7B-Instruct"   # 改成你的本地路径
     arch: "qwen2_5_vl"
     layer_path: null
-    image_pad_token: "<|image_pad|>"     # latent span 定位用; LVR 若同源则不变
+    image_pad_token: "<|image_pad|>"
   qwen2_5_vl_3b:
     name: "Qwen2.5-VL-3B"
     path: "./models/Qwen/Qwen2___5-VL-3B-Instruct"
@@ -21,9 +21,19 @@ models:
   lvr_7b:
     name: "LVR-7B"
     path: "./models/LVR-7B"               # 改成你的路径
-    arch: "qwen2_5_vl"                          # 若 LVR 基于 Qwen2.5-VL, 可改 qwen2_5_vl
+    arch: "lvr_qwen2_5_vl"
     layer_path: null
     image_pad_token: "<|image_pad|>"
+    lvr_start_token: "<|lvr_start|>"
+    lvr_token: "<|lvr|>"
+    lvr_latent_end_token: "<|lvr_latent_end|>"
+    lvr_end_token: "<|lvr_end|>"
+
+audit:
+  mode: "teacher_forced"       # teacher_forced | generation_trace
+  query_target: "auto"         # auto | lvr_placeholder_tokens | answer_probe_pos
+  lvr_decoding_strategy: "steps"
+  lvr_steps: 16
 
 # 旧实验脚本中的短 tag 会自动映射到上面的可读模型名。
 model_aliases:
@@ -60,8 +70,12 @@ metrics:
     enabled: true               # 当前作为 BF-1/CF-2 readout 使用
   bf1_latent_ablation:
     enabled: true
+  bf1_layer_ablation:
+    enabled: false              # legacy whole-layer sweep; --only bf1_layer
   cf2_pf_decay_curve:
     enabled: true
+  lvr_generation_trace:
+    enabled: false              # enable for inference-time LVR trace capture
 
 # -------- PF-3 设置 (BF-1 readout 与 CF-2 都会用) ---------------------------
 pf3:

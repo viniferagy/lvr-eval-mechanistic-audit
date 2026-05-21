@@ -7,11 +7,11 @@ pipeline/internal_metrics.py
 两个指标都是 **model-internal、逐层** 的:
 
 BF-3 (Confidence Progression)
-    在最后一个 latent 位置, 对每层 hidden state 做 logit-lens, 算 entropy。
+    在 adapter 声明的 query span 末端, 对每层 hidden state 做 logit-lens, 算 entropy。
     返回 curve[n_layers]。需要 output_hidden_states。
 
 PF-3 (Corrupted-vs-Intact Attention Distance)
-    intact 与 corrupted 两次 forward, 取 latent→image 的 attention 分布,
+    intact 与 corrupted 两次 forward, 取 query_span→image 的 attention 分布,
     逐层算 KL(intact || corrupted)。返回 curve[n_layers]。
     需要 eager attention + output_attentions。
 
@@ -43,10 +43,15 @@ logger = logging.getLogger("lvr_eval.internal")
 
 
 # --------------------------------------------------------------------------- #
-#  latent span / image token 定位 (Qwen2.5-VL: <|image_pad|>)
+#  audit span helpers
 # --------------------------------------------------------------------------- #
-def get_latent_span(input_ids: torch.Tensor, image_pad_id: int) -> tuple[int, int]:
-    """latent = 最后一个 image token 之后 到 input 末尾。"""
+def get_post_image_text_span(input_ids: torch.Tensor, image_pad_id: int) -> tuple[int, int]:
+    """
+    Legacy helper. This is NOT a latent span.
+
+    It returns the post-image text span and is retained only for debugging old
+    results that treated image_pad[-1] + 1 : seq_end as a latent region.
+    """
     img_pos = (input_ids[0] == image_pad_id).nonzero(as_tuple=True)[0]
     if len(img_pos) == 0:
         raise ValueError("输入里没有 image token —— 检查 image_pad token 是否正确")
@@ -55,6 +60,22 @@ def get_latent_span(input_ids: torch.Tensor, image_pad_id: int) -> tuple[int, in
 
 def get_image_token_indices(input_ids: torch.Tensor, image_pad_id: int) -> torch.Tensor:
     return (input_ids[0] == image_pad_id).nonzero(as_tuple=True)[0]
+
+
+def _query_span_from_adapter(wrapper, inputs, outputs=None):
+    spans = wrapper.adapter.get_spans(wrapper, inputs, outputs)
+    query = spans.preferred_query_span()
+    if query.length <= 0:
+        raise ValueError(f"invalid query span from adapter: {query}")
+    if spans.image_tokens.length <= 0:
+        raise ValueError(f"invalid image span from adapter: {spans.image_tokens}")
+    return spans, query
+
+
+def _span_payload(spans, query_span) -> dict:
+    from .adapters.spans import spans_to_metadata
+
+    return spans_to_metadata(spans, query_span)
 
 
 # --------------------------------------------------------------------------- #
@@ -73,19 +94,39 @@ def logit_lens_entropy(wrapper, hidden_state: torch.Tensor) -> np.ndarray:
 
 
 @_no_grad()
-def bf3_curve(wrapper, image: Image.Image, question: str) -> np.ndarray:
-    """单样本逐层 entropy curve [n_layers]。普通 forward (会受外部 ablation hook 影响)。"""
-    inputs = wrapper.build_inputs(image, question)
-    out = wrapper.model(**inputs, output_hidden_states=True,
-                        output_attentions=False, return_dict=True)
-    latent_start, latent_end = get_latent_span(inputs["input_ids"], wrapper.image_pad_id)
-    last_pos = latent_end - 1
+def bf3_curve_from_inputs(wrapper, inputs, query_span=None, outputs=None) -> np.ndarray:
+    """Compute BF-3 from prebuilt inputs and an adapter-declared query span."""
+    out = outputs
+    if out is None:
+        out = wrapper.model(**inputs, output_hidden_states=True,
+                            output_attentions=False, return_dict=True)
+    if query_span is None:
+        _, query_span = _query_span_from_adapter(wrapper, inputs, out)
+    last_pos = query_span.end - 1
     ents = []
-    # hidden_states: tuple(len = n_layers+1); 跳过 index0(embedding)
     for li in range(1, len(out.hidden_states)):
         h = out.hidden_states[li][0, last_pos, :]
         ents.append(float(logit_lens_entropy(wrapper, h)[0]))
     return np.asarray(ents)
+
+
+@_no_grad()
+def bf3_curve_with_meta(wrapper, image: Image.Image, question: str) -> dict:
+    """Single-sample BF-3 curve plus span metadata."""
+    inputs = wrapper.build_inputs(image, question)
+    out = wrapper.model(**inputs, output_hidden_states=True,
+                        output_attentions=False, return_dict=True)
+    spans, query_span = _query_span_from_adapter(wrapper, inputs, out)
+    return {
+        "curve": bf3_curve_from_inputs(wrapper, inputs, query_span, outputs=out),
+        **_span_payload(spans, query_span),
+    }
+
+
+@_no_grad()
+def bf3_curve(wrapper, image: Image.Image, question: str) -> np.ndarray:
+    """单样本逐层 entropy curve [n_layers]。普通 forward (会受外部 ablation hook 影响)。"""
+    return bf3_curve_with_meta(wrapper, image, question)["curve"]
 
 
 # --------------------------------------------------------------------------- #
@@ -133,9 +174,13 @@ def corrupt_image(image: Image.Image, mode: str,
     """
     if mode.startswith("mask"):
         ratio = severity if severity is not None else (0.8 if "80" in mode else 0.5)
+        if float(ratio) <= 0:
+            return image.convert("RGB")
         return random_patch_mask(image, ratio=ratio, seed=seed)
     if mode == "gaussian_blur":
         radius = severity if severity is not None else 10
+        if float(radius) <= 0:
+            return image.convert("RGB")
         return image.convert("RGB").filter(ImageFilter.GaussianBlur(radius=radius))
     if mode == "patch_shuffle":
         return patch_shuffle(image, grid_size=8, seed=seed)
@@ -156,8 +201,63 @@ def _forward_attn(wrapper, image: Image.Image, question: str) -> dict:
     inputs = wrapper.build_inputs(image, question)
     out = wrapper.model(**inputs, output_hidden_states=False,
                         output_attentions=True, return_dict=True)
+    spans = wrapper.adapter.get_spans(wrapper, inputs, out)
     return {"attentions": out.attentions, "input_ids": inputs["input_ids"],
-            "seq_len": inputs["input_ids"].shape[1]}
+            "inputs": inputs, "spans": spans, "seq_len": inputs["input_ids"].shape[1]}
+
+
+@_no_grad()
+def pf3_curve_with_meta(wrapper, image: Image.Image, question: str,
+                        corruption_mode: str = "mask_50pct",
+                        num_seeds: int = 3,
+                        severity: Optional[float] = None) -> dict:
+    """
+    单样本逐层 attention-distance curve [n_layers] + intact token 数。
+    token 数不一致的 corrupted seed 会被跳过 (Qwen 动态分辨率)。
+    severity 仅 CF-2 用 (连续 corruption 强度)。
+    """
+    intact = _forward_attn(wrapper, image, question)
+    intact_T = intact["seq_len"]
+    intact_attns = intact["attentions"]
+    spans = intact["spans"]
+    query_span = spans.preferred_query_span()
+    image_span = spans.image_tokens
+    image_idx = torch.arange(
+        image_span.start,
+        image_span.end,
+        device=intact["input_ids"].device,
+    )
+
+    n_layers = len(intact_attns)
+    per_seed = []
+    skip_reasons: dict[str, int] = {}
+    # patch_shuffle / blur 在固定 severity 下其实是确定性(blur)或仅依赖 seed(shuffle)
+    for seed in range(num_seeds):
+        corr_img = corrupt_image(image, corruption_mode, seed=seed, severity=severity)
+        corr = _forward_attn(wrapper, corr_img, question)
+        if corr["seq_len"] != intact_T:        # token 数必须一致
+            skip_reasons["seq_len_mismatch"] = skip_reasons.get("seq_len_mismatch", 0) + 1
+            continue
+        corr_attns = corr["attentions"]
+        per_layer = []
+        for li in range(n_layers):
+            Ai = intact_attns[li][0][:, query_span.start:query_span.end, :][:, :, image_idx]
+            Ac = corr_attns[li][0][:, query_span.start:query_span.end, :][:, :, image_idx]
+            Ai = Ai / (Ai.sum(dim=-1, keepdim=True) + 1e-8)
+            Ac = Ac / (Ac.sum(dim=-1, keepdim=True) + 1e-8)
+            per_layer.append(_kl_safe(Ai.float(), Ac.float()).mean().item())
+        per_seed.append(per_layer)
+
+    curve = np.asarray(per_seed).mean(axis=0) if per_seed else None
+    return {
+        "curve": curve,
+        "seq_len": intact_T,
+        "n_total": int(num_seeds),
+        "n_success": len(per_seed),
+        "n_skipped": int(num_seeds - len(per_seed)),
+        "skip_reasons": skip_reasons,
+        **_span_payload(spans, query_span),
+    }
 
 
 @_no_grad()
@@ -170,35 +270,15 @@ def pf3_curve(wrapper, image: Image.Image, question: str,
     token 数不一致的 corrupted seed 会被跳过 (Qwen 动态分辨率)。
     severity 仅 CF-2 用 (连续 corruption 强度)。
     """
-    intact = _forward_attn(wrapper, image, question)
-    intact_T = intact["seq_len"]
-    intact_attns = intact["attentions"]
-    latent_start, latent_end = get_latent_span(intact["input_ids"], wrapper.image_pad_id)
-    image_idx = get_image_token_indices(intact["input_ids"], wrapper.image_pad_id)
-    if len(image_idx) == 0:
-        raise ValueError("No image tokens found")
-
-    n_layers = len(intact_attns)
-    per_seed = []
-    # patch_shuffle / blur 在固定 severity 下其实是确定性(blur)或仅依赖 seed(shuffle)
-    for seed in range(num_seeds):
-        corr_img = corrupt_image(image, corruption_mode, seed=seed, severity=severity)
-        corr = _forward_attn(wrapper, corr_img, question)
-        if corr["seq_len"] != intact_T:        # token 数必须一致
-            continue
-        corr_attns = corr["attentions"]
-        per_layer = []
-        for li in range(n_layers):
-            Ai = intact_attns[li][0][:, latent_start:latent_end, :][:, :, image_idx]
-            Ac = corr_attns[li][0][:, latent_start:latent_end, :][:, :, image_idx]
-            Ai = Ai / (Ai.sum(dim=-1, keepdim=True) + 1e-8)
-            Ac = Ac / (Ac.sum(dim=-1, keepdim=True) + 1e-8)
-            per_layer.append(_kl_safe(Ai.float(), Ac.float()).mean().item())
-        per_seed.append(per_layer)
-
-    if not per_seed:
-        return None, intact_T
-    return np.asarray(per_seed).mean(axis=0), intact_T
+    result = pf3_curve_with_meta(
+        wrapper,
+        image,
+        question,
+        corruption_mode=corruption_mode,
+        num_seeds=num_seeds,
+        severity=severity,
+    )
+    return result["curve"], result["seq_len"]
 
 
 # --------------------------------------------------------------------------- #

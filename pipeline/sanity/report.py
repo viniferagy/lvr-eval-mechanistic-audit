@@ -11,6 +11,7 @@ from .bf3 import check_bf3_curve
 from .cf2 import check_cf2_result
 from .common import FAIL, WARN
 from .pf3 import check_pf3_curve
+from .spans import check_span_metadata
 
 
 def run_sanity_suite(ablation_results: dict[str, dict],
@@ -21,6 +22,7 @@ def run_sanity_suite(ablation_results: dict[str, dict],
 
     for tag, result in ablation_results.items():
         reports.append(check_bf1_result(result, cfg))
+        reports.append(check_span_metadata(result, "bf1_latent_ablation", cfg))
         baseline = result.get("baseline", {})
         if baseline.get("bf3_curve") is not None:
             reports.append(check_bf3_curve(
@@ -41,7 +43,10 @@ def run_sanity_for_metric_result(metric_id: str, result: dict,
                                  cfg: dict | None = None) -> list[dict]:
     """Build sanity reports for one metric result payload."""
     if metric_id == "bf1_latent_ablation":
-        reports = [check_bf1_result(result, cfg)]
+        reports = [
+            check_bf1_result(result, cfg),
+            check_span_metadata(result, metric_id, cfg),
+        ]
         baseline = result.get("baseline", {})
         if baseline.get("bf3_curve") is not None:
             reports.append(check_bf3_curve(
@@ -54,6 +59,11 @@ def run_sanity_for_metric_result(metric_id: str, result: dict,
                 cfg, source="bf1_baseline"
             ))
         return reports
+    if metric_id == "bf1_layer_ablation":
+        return [
+            check_bf1_result(result, cfg),
+            check_span_metadata(result, metric_id, cfg),
+        ]
     if metric_id == "cf2_pf_decay_curve":
         return [check_cf2_result(result, cfg)]
     return []

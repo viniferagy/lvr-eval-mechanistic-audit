@@ -6,6 +6,7 @@ import logging
 import torch
 
 from .base import ModelBundle
+from .spans import AuditSpans, TokenSpan
 
 logger = logging.getLogger("lvr_eval.adapters.qwen_vl")
 
@@ -58,7 +59,7 @@ class QwenVLAdapter:
         tok_text = cfg_model.get("image_pad_token", "<|image_pad|>")
         image_pad_id = processor.tokenizer.convert_tokens_to_ids(tok_text)
         if image_pad_id is None or image_pad_id < 0:
-            logger.warning("image_pad token '%s' 不在词表，PF-3/BF-3 latent span 可能失效", tok_text)
+            logger.warning("image_pad token '%s' 不在词表，image span 定位可能失效", tok_text)
         return image_pad_id
 
     def build_inputs(self, wrapper, image, question: str):
@@ -70,6 +71,30 @@ class QwenVLAdapter:
             messages, tokenize=False, add_generation_prompt=True)
         inputs = wrapper.processor(text=[text], images=[image], return_tensors="pt")
         return inputs.to(wrapper.model.device)
+
+    def get_spans(self, wrapper, inputs, model_outputs=None) -> AuditSpans:
+        ids = inputs["input_ids"][0]
+        image_pos = (ids == wrapper.image_pad_id).nonzero(as_tuple=True)[0]
+        if len(image_pos) == 0:
+            raise ValueError("No image tokens found. Check image_pad_token/image_pad_id.")
+
+        image_span = TokenSpan(
+            start=int(image_pos[0].item()),
+            end=int(image_pos[-1].item()) + 1,
+            kind="image_tokens",
+        )
+
+        return AuditSpans(
+            image_tokens=image_span,
+            question_tokens=None,
+            lvr_placeholder_tokens=None,
+            latent_tokens=None,
+            answer_probe_pos=int(ids.shape[0] - 1),
+            notes={
+                "adapter": "qwen_vl",
+                "latent_tokens": "none_for_qwen_baseline",
+            },
+        )
 
     @torch.no_grad()
     def generate(self, wrapper, images: list, prompts: list[str],
@@ -91,3 +116,5 @@ class QwenVLAdapter:
         trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated)]
         return wrapper.processor.batch_decode(trimmed, skip_special_tokens=True)
 
+    def generate_with_trace(self, wrapper, image, question: str, **kwargs) -> dict:
+        raise NotImplementedError("Qwen baseline has no LVR generation trace.")

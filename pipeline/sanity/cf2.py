@@ -8,6 +8,8 @@ from .common import FAIL, PASS, WARN, as_float_array, is_finite_scalar, make_che
 
 DEFAULTS = {
     "warn_trend_spearman": 0.2,
+    "clean_near_zero": 1e-6,
+    "min_valid_rate": 0.8,
 }
 
 
@@ -57,6 +59,18 @@ def check_cf2_result(result: dict, cfg: dict | None = None) -> dict:
 
         finite_curve = bool(np.all(np.isfinite(curve)))
         checks.append(make_check(prefix + "finite_curve", PASS if finite_curve else FAIL))
+        if finite_curve and curve.size >= 2 and np.isclose(sev[0], 0.0):
+            clean = float(curve[0])
+            later_min = float(np.nanmin(curve[1:]))
+            clean_ok = clean <= float(thresholds["clean_near_zero"]) or clean <= later_min
+            checks.append(make_check(
+                prefix + "severity_zero_clean",
+                PASS if clean_ok else WARN,
+                "severity=0 should be a clean baseline and usually below corrupted points",
+                clean=clean,
+                later_min=later_min,
+                clean_near_zero=float(thresholds["clean_near_zero"]),
+            ))
 
         feats = rec.get("features", {})
         auc = feats.get("auc")
@@ -81,6 +95,17 @@ def check_cf2_result(result: dict, cfg: dict | None = None) -> dict:
                 PASS if np.isfinite(rho) and rho >= float(thresholds["warn_trend_spearman"]) else WARN,
                 "metric should usually rise as image degradation increases",
                 spearman=float(rho),
+            ))
+
+        span_meta = rec.get("span_metadata", {})
+        if span_meta:
+            valid_rate = float(span_meta.get("valid_rate", 0.0))
+            checks.append(make_check(
+                prefix + "span_valid_rate",
+                PASS if valid_rate >= float(thresholds["min_valid_rate"]) else WARN,
+                valid_rate=valid_rate,
+                min_valid_rate=float(thresholds["min_valid_rate"]),
+                query_target_counts=span_meta.get("query_target_counts", {}),
             ))
 
     return make_report("cf2_pf_decay_curve", model, checks, "full_sweep", details)

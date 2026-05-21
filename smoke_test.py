@@ -17,12 +17,15 @@ from __future__ import annotations
 import os
 import json
 import tempfile
+from types import SimpleNamespace
 
 import numpy as np
 from PIL import Image
 
+from pipeline.adapters.qwen_vl import QwenVLAdapter
+from pipeline.adapters.lvr_qwen import LVRQwenAdapter
 from pipeline.data import load_probe_set
-from pipeline.internal_metrics import corrupt_image
+from pipeline.internal_metrics import corrupt_image, get_post_image_text_span
 from pipeline.metrics import list_metrics, resolve_readout
 from pipeline.results import make_metric_result
 from pipeline.degradation import curve_features
@@ -46,11 +49,68 @@ def test_corruption():
     # 连续 severity
     assert corrupt_image(img, "mask", seed=0, severity=0.3).size == img.size
     assert corrupt_image(img, "gaussian_blur", severity=15).size == img.size
+    assert np.array_equal(np.asarray(corrupt_image(img, "mask", seed=0, severity=0)), np.asarray(img.convert("RGB")))
+    assert np.array_equal(np.asarray(corrupt_image(img, "gaussian_blur", severity=0)), np.asarray(img.convert("RGB")))
     print("  连续 severity (mask=0.3, blur=15) -> ok")
+    print("  severity=0 clean baseline -> ok")
+
+
+def test_spans():
+    print("\n== 2. adapter span semantics ==")
+    try:
+        import torch
+    except ImportError:
+        print("  torch unavailable; skip span unit checks")
+        return
+
+    image_pad_id = 99
+    qwen_inputs = {"input_ids": torch.tensor([[1, image_pad_id, image_pad_id, 10, 11, 12]])}
+    qwen_wrapper = SimpleNamespace(image_pad_id=image_pad_id)
+    qwen_spans = QwenVLAdapter("qwen2_5_vl").get_spans(qwen_wrapper, qwen_inputs)
+    assert qwen_spans.image_tokens.start == 1 and qwen_spans.image_tokens.end == 3
+    assert qwen_spans.latent_tokens is None
+    assert qwen_spans.answer_probe_pos == 5
+    qwen_query = qwen_spans.preferred_query_span()
+    assert (qwen_query.start, qwen_query.end, qwen_query.kind) == (5, 6, "answer_probe_pos")
+    print("  Qwen baseline span -> ok")
+
+    lvr_start_id, lvr_id, lvr_latent_end_id, lvr_end_id = 201, 202, 203, 204
+    lvr_inputs = {"input_ids": torch.tensor([[
+        image_pad_id, image_pad_id,
+        lvr_start_id,
+        lvr_id, lvr_id, lvr_id,
+        lvr_end_id,
+        300,
+    ]])}
+    lvr_wrapper = SimpleNamespace(
+        image_pad_id=image_pad_id,
+        model=SimpleNamespace(config=SimpleNamespace(
+            lvr_start_id=lvr_start_id,
+            lvr_id=lvr_id,
+            lvr_latent_end_id=lvr_latent_end_id,
+            lvr_end_id=lvr_end_id,
+        )),
+    )
+    lvr_spans = LVRQwenAdapter().get_spans(lvr_wrapper, lvr_inputs)
+    assert lvr_spans.image_tokens.start == 0 and lvr_spans.image_tokens.end == 2
+    assert lvr_spans.lvr_placeholder_tokens is not None
+    assert lvr_spans.lvr_placeholder_tokens.start == 3
+    assert lvr_spans.lvr_placeholder_tokens.end == 6
+    lvr_query = lvr_spans.preferred_query_span()
+    assert (lvr_query.start, lvr_query.end, lvr_query.kind) == (3, 6, "lvr_placeholder_tokens")
+    print("  LVR teacher-forced span -> ok")
+
+    assert get_post_image_text_span(qwen_inputs["input_ids"], image_pad_id) == (3, 6)
+    for rel in ["pipeline/internal_metrics.py", "pipeline/metrics/bf3_confidence_progression.py",
+                "pipeline/metrics/pf3_attention_distance.py", "pipeline/ablation.py"]:
+        with open(rel, encoding="utf-8") as f:
+            source = f.read()
+        assert ("get_" + "latent_span") not in source, rel
+    print("  legacy latent helper removed from production usage -> ok")
 
 
 def test_reductions():
-    print("\n== 2. curve 归约 + 特征 ==")
+    print("\n== 3. curve 归约 + 特征 ==")
     metric_ids = {m.metric_id for m in list_metrics()}
     assert "bf3_confidence_progression" in metric_ids
     assert "pf3_attention_distance" in metric_ids
@@ -75,7 +135,7 @@ def test_reductions():
 
 
 def test_data_field_mapping():
-    print("\n== 3. data field mapping ==")
+    print("\n== 4. data field mapping ==")
     out_dir = tempfile.mkdtemp(prefix="lvr_data_")
     img_path = os.path.join(out_dir, "sample.png")
     make_img(seed=7).save(img_path)
@@ -144,7 +204,7 @@ def fake_cf2(tag, robust=1.0):
 
 
 def test_end_to_end():
-    print("\n== 4. sanity + 端到端 analysis(合成数据) ==")
+    print("\n== 5. sanity + 端到端 analysis(合成数据) ==")
     ablation = {
         "qwen2_5_vl_7b": fake_bf1("qwen2_5_vl_7b", strength=1.4),
         "lvr_7b": fake_bf1("lvr_7b", strength=0.7),
@@ -183,6 +243,7 @@ def test_end_to_end():
 
 def main():
     test_corruption()
+    test_spans()
     test_reductions()
     test_data_field_mapping()
     test_end_to_end()

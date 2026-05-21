@@ -249,8 +249,6 @@ def selected_metric_ids(tokens: list[str], cfg: dict) -> list[str]:
             raise SystemExit(f"unknown --only metric '{token}'. Known runnable metrics: {known}") from exc
         if metric_id not in runnable:
             raise SystemExit(f"--only {token} is a readout metric, not a runnable sweep metric")
-        if not metric_enabled(cfg, metric_id):
-            continue
         out.append(metric_id)
     return list(dict.fromkeys(out))
 
@@ -319,7 +317,7 @@ def main():
         for metric_id in metric_ids:
             res = run_metric(metric_id, wrapper, samples, cfg, tag)
             metric_results.append(write_metric_result(out_dir, metric_id, tag, res))
-            if metric_id == "bf1_latent_ablation":
+            if metric_id in {"bf1_latent_ablation", "bf1_layer_ablation"}:
                 ablation_results[tag] = res
             elif metric_id == "cf2_pf_decay_curve":
                 decay_results[tag] = res
