@@ -100,6 +100,14 @@ def test_spans():
     assert (lvr_query.start, lvr_query.end, lvr_query.kind) == (3, 6, "lvr_placeholder_tokens")
     print("  LVR teacher-forced span -> ok")
 
+    no_lvr_inputs = {"input_ids": torch.tensor([[image_pad_id, image_pad_id, 300]])}
+    try:
+        LVRQwenAdapter().get_spans(lvr_wrapper, no_lvr_inputs)
+        raise AssertionError("LVR teacher-forced span fallback should fail")
+    except ValueError as exc:
+        assert "expected <|lvr|>" in str(exc)
+    print("  LVR teacher-forced missing <|lvr|> -> fail-fast ok")
+
     assert get_post_image_text_span(qwen_inputs["input_ids"], image_pad_id) == (3, 6)
     for rel in ["pipeline/internal_metrics.py", "pipeline/metrics/bf3_confidence_progression.py",
                 "pipeline/metrics/pf3_attention_distance.py", "pipeline/ablation.py"]:
@@ -167,6 +175,72 @@ def test_data_field_mapping():
     print("  jsonl custom field_map -> ok")
 
 
+def test_lvr_json_loader():
+    print("\n== 5. LVR JSON loader ==")
+    out_dir = tempfile.mkdtemp(prefix="lvr_json_")
+    os.makedirs(os.path.join(out_dir, "viscot/flickr30k"), exist_ok=True)
+    img_rel = "viscot/flickr30k/sample.png"
+    img_path = os.path.join(out_dir, img_rel)
+    make_img(seed=9).save(img_path)
+
+    data = [{
+        "dataset": "flickr30k",
+        "split": "train",
+        "question_id": 31593,
+        "image": [img_rel],
+        "conversations": [
+            {
+                "from": "human",
+                "value": "<image>\nCan you describe the lower apparel?",
+            },
+            {
+                "from": "gpt",
+                "value": "<lvr>\n<answer>dark blue denim shorts</answer>",
+            },
+        ],
+        "bboxes": [[0.382, 0.456, 0.718, 0.656]],
+    }]
+
+    json_path = os.path.join(out_dir, "lvr.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+    samples = load_probe_set({
+        "source_type": "lvr_json",
+        "json_path": json_path,
+        "image_root": out_dir,
+        "max_samples": 10,
+        "skip_missing_images": False,
+    })
+
+    assert len(samples) == 1
+    s = samples[0]
+    assert s.id == "31593"
+    assert "lower apparel" in s.question
+    assert s.answer == "dark blue denim shorts"
+    assert s.lvr_assistant.startswith("<lvr>")
+    assert s.bboxes == [[0.382, 0.456, 0.718, 0.656]]
+    assert s.source_dataset == "flickr30k"
+    print("  LVR JSON list -> ProbeSample with lvr metadata ok")
+
+
+def test_lvr_assistant_expansion():
+    print("\n== 6. LVR assistant expansion ==")
+    sample = SimpleNamespace(
+        lvr_assistant="<lvr>\n<answer>B</answer>",
+        answer="B",
+    )
+    wrapper = SimpleNamespace(cfg={"audit": {"lvr_num_tokens": 3}})
+    adapter = LVRQwenAdapter()
+    text = adapter._teacher_forced_assistant_text(wrapper, sample)
+    assert "<lvr>" not in text
+    assert text.count("<|lvr|>") == 3
+    assert text.startswith("<|lvr_start|>")
+    assert "<|lvr_end|>" in text
+    assert "<answer>B</answer>" in text
+    print("  <lvr> -> special token sequence ok")
+
+
 def fake_bf1(tag, n_layers=28, strength=1.0):
     rng = np.random.default_rng(hash(tag) % 2**31)
     base_bf3 = np.linspace(6, 1, n_layers)
@@ -204,7 +278,7 @@ def fake_cf2(tag, robust=1.0):
 
 
 def test_end_to_end():
-    print("\n== 5. sanity + 端到端 analysis(合成数据) ==")
+    print("\n== 7. sanity + 端到端 analysis(合成数据) ==")
     ablation = {
         "qwen2_5_vl_7b": fake_bf1("qwen2_5_vl_7b", strength=1.4),
         "lvr_7b": fake_bf1("lvr_7b", strength=0.7),
@@ -246,6 +320,8 @@ def main():
     test_spans()
     test_reductions()
     test_data_field_mapping()
+    test_lvr_json_loader()
+    test_lvr_assistant_expansion()
     test_end_to_end()
     print("\nSMOKE TEST PASSED ✅")
 

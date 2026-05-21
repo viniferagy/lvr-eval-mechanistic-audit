@@ -72,6 +72,9 @@ class QwenVLAdapter:
         inputs = wrapper.processor(text=[text], images=[image], return_tensors="pt")
         return inputs.to(wrapper.model.device)
 
+    def build_inputs_from_sample(self, wrapper, sample):
+        return self.build_inputs(wrapper, sample.image, sample.question)
+
     def get_spans(self, wrapper, inputs, model_outputs=None) -> AuditSpans:
         ids = inputs["input_ids"][0]
         image_pos = (ids == wrapper.image_pad_id).nonzero(as_tuple=True)[0]

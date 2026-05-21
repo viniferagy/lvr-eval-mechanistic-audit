@@ -59,12 +59,23 @@ def check_span_metadata(result: dict, metric_id: str,
             query_target_counts=counts,
         ))
     if is_lvr:
-        checks.append(make_check(
-            "lvr_uses_lvr_placeholder_when_available",
-            PASS if counts.get("lvr_placeholder_tokens", 0) > 0 else WARN,
-            "Teacher-forced LVR should prefer <|lvr|> placeholder tokens when present",
-            query_target_counts=counts,
-        ))
+        audit_cfg = (cfg or {}).get("audit", {}) if isinstance(cfg or {}, dict) else {}
+        if audit_cfg.get("mode", "teacher_forced") == "teacher_forced":
+            allow_fallback = bool(audit_cfg.get("allow_lvr_fallback_to_answer_probe", False))
+            checks.append(make_check(
+                "lvr_teacher_forced_uses_lvr_placeholder",
+                PASS if counts.get("lvr_placeholder_tokens", 0) > 0 else (WARN if allow_fallback else FAIL),
+                "LVR teacher-forced audit must use <|lvr|> placeholder tokens",
+                query_target_counts=counts,
+                allow_fallback=allow_fallback,
+            ))
+        else:
+            checks.append(make_check(
+                "lvr_uses_lvr_placeholder_when_available",
+                PASS if counts.get("lvr_placeholder_tokens", 0) > 0 else WARN,
+                "LVR should prefer <|lvr|> placeholder tokens when present",
+                query_target_counts=counts,
+            ))
 
     for idx, rec in enumerate(meta.get("examples", [])):
         query_span = rec.get("query_span")

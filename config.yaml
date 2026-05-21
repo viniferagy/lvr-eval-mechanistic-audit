@@ -32,6 +32,8 @@ models:
 audit:
   mode: "teacher_forced"       # teacher_forced | generation_trace
   query_target: "auto"         # auto | lvr_placeholder_tokens | answer_probe_pos
+  lvr_num_tokens: 16            # teacher_forced 时把官方 <lvr> 展开成多少个 <|lvr|>
+  allow_lvr_fallback_to_answer_probe: false
   lvr_decoding_strategy: "steps"
   lvr_steps: 16
 
@@ -43,9 +45,10 @@ model_aliases:
 
 # -------- Probe 数据集 (复用 BF-3/PF-3 的 audit 集; PF-3 不能用 synthetic) ----
 data:
-  source_type: "hf"          # "jsonl" | "hf"
+  source_type: "lvr_json"          # "jsonl" | "hf" | "lvr_json"
+  json_path: "./data/meta_data_lvr_sft_stage1.json"  # source_type=lvr_json 时用; data/ 不进 git
   jsonl_path: "./data/audit_set.jsonl"   # 每行 {"image","question","answer"?,"id"?}
-  image_root: "./data/images"
+  image_root: "./data/images"      # 指向包含 viscot/ 等图像路径的根目录
   hf_name: "lmms-lab-eval/MMVP"  # source_type=hf 时用
   hf_split: "train"
   field_map:                    # 可改成目标数据集的字段名; 支持 ["a", "b"] fallback 和 "meta.id" 点路径
@@ -55,6 +58,7 @@ data:
     id: ["id", "sample_id", "uid"]
   max_samples: 50                # 内部指标 + eager attention 偏重, 默认 30
   shuffle_seed: 0
+  skip_missing_images: true       # LVR 图像下载未完成时先跳过缺失样本
 
 inference:
   dtype: "bfloat16"

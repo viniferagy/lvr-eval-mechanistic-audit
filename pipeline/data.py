@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import random
+import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -36,6 +37,11 @@ class ProbeSample:
     image: Image.Image
     question: str
     answer: Any
+    raw: Optional[dict] = None
+    image_path: Optional[str] = None
+    bboxes: Optional[list] = None
+    lvr_assistant: Optional[str] = None
+    source_dataset: Optional[str] = None
 
 
 def _open_rgb(path: str) -> Image.Image:
@@ -87,6 +93,8 @@ def load_probe_set(cfg_data: dict) -> list[ProbeSample]:
         samples = _load_jsonl(cfg_data)
     elif src == "hf":
         samples = _load_hf(cfg_data)
+    elif src == "lvr_json":
+        samples = _load_lvr_json(cfg_data)
     else:
         raise ValueError(f"未知 source_type: {src}")
 
@@ -116,6 +124,11 @@ def _load_jsonl(cfg: dict) -> list[ProbeSample]:
                 image=_load_image_value(img_value, image_root),
                 question=str(_field_value(r, cfg, "question", default="")),
                 answer=_field_value(r, cfg, "answer"),
+                raw=r,
+                image_path=str(img_value),
+                bboxes=r.get("bboxes"),
+                lvr_assistant=r.get("lvr_assistant"),
+                source_dataset=r.get("dataset"),
             ))
     return out
 
@@ -147,7 +160,126 @@ def _load_hf(cfg: dict) -> list[ProbeSample]:
             image=_load_image_value(img),
             question=str(_field_value(r, cfg, "question", default="")),
             answer=_field_value(r, cfg, "answer"),
+            raw=dict(r),
+            image_path=None,
+            bboxes=r.get("bboxes") if isinstance(r, dict) else None,
+            lvr_assistant=r.get("lvr_assistant") if isinstance(r, dict) else None,
+            source_dataset=r.get("dataset") if isinstance(r, dict) else None,
         ))
+    return out
+
+
+def _strip_image_placeholder(text: str) -> str:
+    return (
+        text.replace("<image>", "")
+        .replace("<|vision_start|>", "")
+        .replace("<|vision_end|>", "")
+        .replace("<|image_pad|>", "")
+        .strip()
+    )
+
+
+def _extract_answer_from_lvr_assistant(text: str):
+    if text is None:
+        return None
+    m = re.search(r"<answer>(.*?)</answer>", text, flags=re.DOTALL | re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    cleaned = text.replace("<lvr>", "").strip()
+    return cleaned or None
+
+
+def _conversation_by_role(conversations: list[dict], role: str) -> dict | None:
+    aliases = {
+        "human": {"human", "user"},
+        "gpt": {"gpt", "assistant"},
+        "user": {"human", "user"},
+        "assistant": {"gpt", "assistant"},
+    }[role]
+    for msg in conversations:
+        if str(msg.get("from", msg.get("role", ""))).lower() in aliases:
+            return msg
+    return None
+
+
+def _first_image_path(value):
+    if isinstance(value, list):
+        if not value:
+            raise ValueError("empty image list")
+        return value[0]
+    return value
+
+
+def _load_lvr_json(cfg: dict) -> list[ProbeSample]:
+    path = cfg["json_path"]
+    image_root = cfg.get("image_root", "")
+    max_records = cfg.get("max_records_before_sampling")
+
+    with open(path, "r", encoding="utf-8") as f:
+        records = json.load(f)
+
+    if not isinstance(records, list):
+        raise ValueError(f"LVR JSON must be a list, got {type(records)}: {path}")
+
+    out: list[ProbeSample] = []
+    for i, r in enumerate(records):
+        if max_records and i >= int(max_records):
+            break
+        if not isinstance(r, dict):
+            logger.debug("skip LVR record %s: expected dict, got %s", i, type(r))
+            continue
+
+        conversations = r.get("conversations")
+        if not isinstance(conversations, list) or len(conversations) < 2:
+            logger.debug("skip LVR record %s: missing conversations", i)
+            continue
+
+        human = _conversation_by_role(conversations, "human")
+        assistant = _conversation_by_role(conversations, "gpt")
+        if human is None or assistant is None:
+            logger.debug("skip LVR record %s: missing human/gpt message", i)
+            continue
+
+        human_value = str(human.get("value", human.get("content", "")))
+        assistant_value = str(assistant.get("value", assistant.get("content", "")))
+
+        question = _strip_image_placeholder(human_value)
+        answer = _extract_answer_from_lvr_assistant(assistant_value)
+
+        img_value = r.get("image")
+        if img_value is None:
+            logger.debug("skip LVR record %s: missing image", i)
+            continue
+        img_path = str(_first_image_path(img_value))
+
+        try:
+            image = _load_image_value(img_path, image_root)
+        except Exception as exc:  # noqa: BLE001
+            if cfg.get("skip_missing_images", True):
+                logger.debug("skip LVR record %s: image open failed: %s", i, exc)
+                continue
+            raise
+
+        sample_id = (
+            r.get("id")
+            or r.get("question_id")
+            or r.get("uid")
+            or f"lvr_{i}"
+        )
+
+        out.append(ProbeSample(
+            id=str(sample_id),
+            image=image,
+            question=question,
+            answer=answer,
+            raw=r,
+            image_path=img_path,
+            bboxes=r.get("bboxes"),
+            lvr_assistant=assistant_value,
+            source_dataset=r.get("dataset"),
+        ))
+
+    logger.info("loaded LVR JSON: %s -> %d usable samples", path, len(out))
     return out
 
 

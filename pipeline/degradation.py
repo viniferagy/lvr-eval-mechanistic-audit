@@ -20,6 +20,7 @@ severity 含义随 corruption family:
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Optional
 
 import numpy as np
@@ -111,8 +112,8 @@ def _metric_at_severity(wrapper, samples: list[ProbeSample], mode: str,
         for s in samples:
             span_stats["n_total"] += 1
             try:
-                meta = IM.pf3_curve_with_meta(
-                    wrapper, s.image, s.question,
+                meta = IM.pf3_curve_with_meta_from_sample(
+                    wrapper, s,
                     corruption_mode=mode, num_seeds=seeds,
                     severity=severity,
                 )
@@ -134,8 +135,9 @@ def _metric_at_severity(wrapper, samples: list[ProbeSample], mode: str,
             span_stats["n_total"] += 1
             img = (s.image if severity == 0
                    else IM.corrupt_image(s.image, mode, seed=0, severity=severity))
+            s_corr = replace(s, image=img)
             try:
-                meta = IM.bf3_curve_with_meta(wrapper, img, s.question)
+                meta = IM.bf3_curve_with_meta_from_sample(wrapper, s_corr)
                 vals.append(bf3_reduce(meta["curve"])["final_entropy"])
                 _record_span_success(span_stats, meta)
             except Exception as e:  # noqa: BLE001

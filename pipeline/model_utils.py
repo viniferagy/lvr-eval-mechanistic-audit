@@ -110,6 +110,7 @@ class VLMWrapper:
     image_pad_id: int
     final_norm: Any
     lm_head: Any
+    cfg: Optional[dict] = None
 
     @property
     def n_layers(self) -> int:
@@ -119,6 +120,11 @@ class VLMWrapper:
     def build_inputs(self, image, question: str):
         return self.adapter.build_inputs(self, image, question)
 
+    def build_inputs_from_sample(self, sample):
+        if hasattr(self.adapter, "build_inputs_from_sample"):
+            return self.adapter.build_inputs_from_sample(self, sample)
+        return self.adapter.build_inputs(self, sample.image, sample.question)
+
     # ---- 生成（可选, 用于 output-accuracy sanity） ----
     @torch.no_grad()
     def generate(self, images: list, prompts: list[str], max_new_tokens: int = 64) -> list[str]:
@@ -126,7 +132,7 @@ class VLMWrapper:
 
 
 def load_model(cfg_model: dict, dtype: str = "bfloat16",
-               device: str = "cuda:0") -> VLMWrapper:
+               device: str = "cuda:0", cfg: Optional[dict] = None) -> VLMWrapper:
     arch = cfg_model.get("arch", "auto")
     torch_dtype = _DTYPE[dtype]
     adapter = get_adapter(arch)
@@ -140,4 +146,5 @@ def load_model(cfg_model: dict, dtype: str = "bfloat16",
         image_pad_id=bundle.image_pad_id,
         final_norm=find_final_norm(bundle.model),
         lm_head=find_lm_head(bundle.model),
+        cfg=cfg,
     )

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import random
+from dataclasses import replace
 from typing import Optional
 
 import numpy as np
@@ -78,6 +79,12 @@ def _span_payload(spans, query_span) -> dict:
     return spans_to_metadata(spans, query_span)
 
 
+def _build_inputs(wrapper, image=None, question: str | None = None, sample=None):
+    if sample is not None and hasattr(wrapper, "build_inputs_from_sample"):
+        return wrapper.build_inputs_from_sample(sample)
+    return wrapper.build_inputs(image, question)
+
+
 # --------------------------------------------------------------------------- #
 #  BF-3 : logit-lens entropy
 # --------------------------------------------------------------------------- #
@@ -113,7 +120,20 @@ def bf3_curve_from_inputs(wrapper, inputs, query_span=None, outputs=None) -> np.
 @_no_grad()
 def bf3_curve_with_meta(wrapper, image: Image.Image, question: str) -> dict:
     """Single-sample BF-3 curve plus span metadata."""
-    inputs = wrapper.build_inputs(image, question)
+    inputs = _build_inputs(wrapper, image=image, question=question)
+    out = wrapper.model(**inputs, output_hidden_states=True,
+                        output_attentions=False, return_dict=True)
+    spans, query_span = _query_span_from_adapter(wrapper, inputs, out)
+    return {
+        "curve": bf3_curve_from_inputs(wrapper, inputs, query_span, outputs=out),
+        **_span_payload(spans, query_span),
+    }
+
+
+@_no_grad()
+def bf3_curve_with_meta_from_sample(wrapper, sample) -> dict:
+    """Single-sample BF-3 using full ProbeSample metadata."""
+    inputs = _build_inputs(wrapper, sample=sample)
     out = wrapper.model(**inputs, output_hidden_states=True,
                         output_attentions=False, return_dict=True)
     spans, query_span = _query_span_from_adapter(wrapper, inputs, out)
@@ -198,7 +218,17 @@ def _kl_safe(p: torch.Tensor, q: torch.Tensor, eps=1e-8) -> torch.Tensor:
 
 @_no_grad()
 def _forward_attn(wrapper, image: Image.Image, question: str) -> dict:
-    inputs = wrapper.build_inputs(image, question)
+    inputs = _build_inputs(wrapper, image=image, question=question)
+    out = wrapper.model(**inputs, output_hidden_states=False,
+                        output_attentions=True, return_dict=True)
+    spans = wrapper.adapter.get_spans(wrapper, inputs, out)
+    return {"attentions": out.attentions, "input_ids": inputs["input_ids"],
+            "inputs": inputs, "spans": spans, "seq_len": inputs["input_ids"].shape[1]}
+
+
+@_no_grad()
+def _forward_attn_from_sample(wrapper, sample) -> dict:
+    inputs = _build_inputs(wrapper, sample=sample)
     out = wrapper.model(**inputs, output_hidden_states=False,
                         output_attentions=True, return_dict=True)
     spans = wrapper.adapter.get_spans(wrapper, inputs, out)
@@ -236,6 +266,59 @@ def pf3_curve_with_meta(wrapper, image: Image.Image, question: str,
         corr_img = corrupt_image(image, corruption_mode, seed=seed, severity=severity)
         corr = _forward_attn(wrapper, corr_img, question)
         if corr["seq_len"] != intact_T:        # token 数必须一致
+            skip_reasons["seq_len_mismatch"] = skip_reasons.get("seq_len_mismatch", 0) + 1
+            continue
+        corr_attns = corr["attentions"]
+        per_layer = []
+        for li in range(n_layers):
+            Ai = intact_attns[li][0][:, query_span.start:query_span.end, :][:, :, image_idx]
+            Ac = corr_attns[li][0][:, query_span.start:query_span.end, :][:, :, image_idx]
+            Ai = Ai / (Ai.sum(dim=-1, keepdim=True) + 1e-8)
+            Ac = Ac / (Ac.sum(dim=-1, keepdim=True) + 1e-8)
+            per_layer.append(_kl_safe(Ai.float(), Ac.float()).mean().item())
+        per_seed.append(per_layer)
+
+    curve = np.asarray(per_seed).mean(axis=0) if per_seed else None
+    return {
+        "curve": curve,
+        "seq_len": intact_T,
+        "n_total": int(num_seeds),
+        "n_success": len(per_seed),
+        "n_skipped": int(num_seeds - len(per_seed)),
+        "skip_reasons": skip_reasons,
+        **_span_payload(spans, query_span),
+    }
+
+
+@_no_grad()
+def pf3_curve_with_meta_from_sample(wrapper, sample,
+                                    corruption_mode: str = "mask_50pct",
+                                    num_seeds: int = 3,
+                                    severity: Optional[float] = None) -> dict:
+    """
+    Sample-level PF-3 path. Required for LVR teacher-forced inputs because the
+    assistant-side <lvr> metadata lives on ProbeSample.
+    """
+    intact = _forward_attn_from_sample(wrapper, sample)
+    intact_T = intact["seq_len"]
+    intact_attns = intact["attentions"]
+    spans = intact["spans"]
+    query_span = spans.preferred_query_span()
+    image_span = spans.image_tokens
+    image_idx = torch.arange(
+        image_span.start,
+        image_span.end,
+        device=intact["input_ids"].device,
+    )
+
+    n_layers = len(intact_attns)
+    per_seed = []
+    skip_reasons: dict[str, int] = {}
+    for seed in range(num_seeds):
+        corr_img = corrupt_image(sample.image, corruption_mode, seed=seed, severity=severity)
+        corr_sample = replace(sample, image=corr_img)
+        corr = _forward_attn_from_sample(wrapper, corr_sample)
+        if corr["seq_len"] != intact_T:
             skip_reasons["seq_len_mismatch"] = skip_reasons.get("seq_len_mismatch", 0) + 1
             continue
         corr_attns = corr["attentions"]

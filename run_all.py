@@ -310,9 +310,12 @@ def main():
             log.warning("config 中无模型 %s，跳过", tag)
             continue
         wait_for_lvr_model_if_needed(tag, cfg["models"][tag], log)
-        wrapper = load_model(cfg["models"][tag],
-                             dtype=cfg["inference"]["dtype"],
-                             device=cfg["inference"]["device"])
+        wrapper = load_model(
+            cfg["models"][tag],
+            dtype=cfg["inference"]["dtype"],
+            device=cfg["inference"]["device"],
+            cfg=cfg,
+        )
 
         for metric_id in metric_ids:
             res = run_metric(metric_id, wrapper, samples, cfg, tag)

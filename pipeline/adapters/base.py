@@ -30,6 +30,9 @@ class VLMAdapter(Protocol):
     def build_inputs(self, wrapper, image, question: str):
         """Build a single-sample model input object."""
 
+    def build_inputs_from_sample(self, wrapper, sample):
+        """Build model inputs from full ProbeSample metadata."""
+
     def get_spans(self, wrapper, inputs, model_outputs=None) -> AuditSpans:
         """Return audit-relevant token spans for one model input."""
 

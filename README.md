@@ -166,9 +166,38 @@ models:
 audit:
   mode: "teacher_forced"
   query_target: "auto"
+  lvr_num_tokens: 16
+  allow_lvr_fallback_to_answer_probe: false
   lvr_decoding_strategy: "steps"
   lvr_steps: 16
 ```
+
+LVR 官方 JSON list 数据：
+
+```yaml
+data:
+  source_type: "lvr_json"
+  json_path: "./data/meta_data_lvr_sft_stage1.json"
+  image_root: "./data/images"
+  max_samples: 50
+  skip_missing_images: true
+```
+
+`lvr_json` loader 读取官方 LLaVA-style list record，并保留完整 metadata：
+
+- `image`
+- `conversations`
+- assistant-side `<lvr>`
+- optional `bboxes`
+- `dataset`
+
+在 `audit.mode=teacher_forced` 时，`LVRQwenAdapter` 会把 assistant 文本中的第一个 `<lvr>` 展开为：
+
+```text
+<|lvr_start|><|lvr|>...<|lvr|><|lvr_end|>
+```
+
+`audit.lvr_num_tokens` 控制 `<|lvr|>` 的数量。`allow_lvr_fallback_to_answer_probe=false` 时，如果 LVR teacher-forced 输入中没有产生 `<|lvr|>` span，run 会 fail，而不是悄悄退回 answer-probe control。
 
 metric 开关：
 
@@ -298,6 +327,8 @@ runs/<run>/sanity/
 - registry metric aliases。
 - curve reductions。
 - data field mapping。
+- LVR JSON list loader。
+- assistant-side `<lvr>` expansion。
 - sanity reports。
 - unified MetricResult 到 analysis artifacts。
 

@@ -92,9 +92,7 @@ def probe_internal(wrapper, samples: list[ProbeSample], cfg: dict) -> dict:
     pf3_seeds = cfg["pf3"]["num_seeds"]
     bf3_metric = resolve_readout("bf3")
     pf3_metric = resolve_readout("pf3")
-    bf3_curve = bf3_metric.require_curve()
     bf3_reduce = bf3_metric.require_reduce()
-    pf3_curve = pf3_metric.require_curve()
     pf3_reduce = pf3_metric.require_reduce()
 
     bf3_curves, pf3_curves = [], []
@@ -125,7 +123,7 @@ def probe_internal(wrapper, samples: list[ProbeSample], cfg: dict) -> dict:
             try:
                 from . import internal_metrics as IM
 
-                meta = IM.bf3_curve_with_meta(wrapper, s.image, s.question)
+                meta = IM.bf3_curve_with_meta_from_sample(wrapper, s)
                 bf3_curves.append(meta["curve"])
                 record_success(meta)
             except Exception as e:  # noqa: BLE001
@@ -135,8 +133,8 @@ def probe_internal(wrapper, samples: list[ProbeSample], cfg: dict) -> dict:
             try:
                 from . import internal_metrics as IM
 
-                meta = IM.pf3_curve_with_meta(
-                    wrapper, s.image, s.question,
+                meta = IM.pf3_curve_with_meta_from_sample(
+                    wrapper, s,
                     corruption_mode=pf3_mode, num_seeds=pf3_seeds,
                 )
                 if meta["curve"] is not None:
@@ -219,7 +217,7 @@ def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
     query_target_counts: dict[str, int] = {}
     for s in samples:
         try:
-            inputs = wrapper.build_inputs(s.image, s.question)
+            inputs = wrapper.build_inputs_from_sample(s)
             out = wrapper.model(
                 **inputs,
                 output_hidden_states=True,

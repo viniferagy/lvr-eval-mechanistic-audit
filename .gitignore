@@ -16,6 +16,8 @@ env/
 # Large model/data artifacts
 models/*
 !models/.gitkeep
+data/*
+!data/.gitkeep
 *.safetensors
 *.bin
 *.pt
@@ -36,4 +38,3 @@ runs/*
 *.log
 *.tmp
 tmp/
-

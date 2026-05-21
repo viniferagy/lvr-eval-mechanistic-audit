@@ -87,6 +87,56 @@ class LVRQwenAdapter(QwenVLAdapter):
             model.config.lvr_end_id,
         )
 
+    def _make_lvr_sequence(self, wrapper, sample, cfg: dict | None = None) -> str:
+        cfg = cfg or getattr(wrapper, "cfg", {}) or {}
+        audit_cfg = cfg.get("audit", {}) if isinstance(cfg, dict) else {}
+        n = int(audit_cfg.get("lvr_num_tokens", 16))
+        return "<|lvr_start|>" + "<|lvr|>" * n + "<|lvr_end|>"
+
+    def _teacher_forced_assistant_text(self, wrapper, sample) -> str:
+        assistant = sample.lvr_assistant or ""
+        if "<lvr>" in assistant:
+            return assistant.replace("<lvr>", self._make_lvr_sequence(wrapper, sample), 1)
+
+        answer = sample.answer or ""
+        return f"{self._make_lvr_sequence(wrapper, sample)}\n<answer>{answer}</answer>"
+
+    def build_teacher_forced_inputs_from_sample(self, wrapper, sample):
+        assistant_text = self._teacher_forced_assistant_text(wrapper, sample)
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": sample.image},
+                    {"type": "text", "text": sample.question},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": assistant_text,
+            },
+        ]
+        text = wrapper.processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        inputs = wrapper.processor(
+            text=[text],
+            images=[sample.image],
+            padding=True,
+            return_tensors="pt",
+        ).to(wrapper.model.device)
+        return inputs
+
+    def build_inputs_from_sample(self, wrapper, sample):
+        cfg = getattr(wrapper, "cfg", {}) or {}
+        audit_cfg = cfg.get("audit", {}) if isinstance(cfg, dict) else {}
+        mode = audit_cfg.get("mode", "teacher_forced")
+        if mode == "teacher_forced":
+            return self.build_teacher_forced_inputs_from_sample(wrapper, sample)
+        return self.build_inputs(wrapper, sample.image, sample.question)
+
     def get_spans(self, wrapper, inputs, model_outputs=None) -> AuditSpans:
         ids = inputs["input_ids"][0]
         image_pos = (ids == wrapper.image_pad_id).nonzero(as_tuple=True)[0]
@@ -107,6 +157,16 @@ class LVRQwenAdapter(QwenVLAdapter):
                 start=int(lvr_pos[0].item()),
                 end=int(lvr_pos[-1].item()) + 1,
                 kind="lvr_placeholder_tokens",
+            )
+
+        cfg = getattr(wrapper, "cfg", {}) or {}
+        audit_cfg = cfg.get("audit", {}) if isinstance(cfg, dict) else {}
+        allow_fallback = bool(audit_cfg.get("allow_lvr_fallback_to_answer_probe", False))
+        mode = audit_cfg.get("mode", "teacher_forced")
+        if mode == "teacher_forced" and lvr_span is None and not allow_fallback:
+            raise ValueError(
+                "LVR teacher_forced audit expected <|lvr|> placeholder tokens, "
+                "but none were found. Check source_type=lvr_json and sample.lvr_assistant."
             )
 
         return AuditSpans(
