@@ -66,6 +66,22 @@ def run_sanity_for_metric_result(metric_id: str, result: dict,
         ]
     if metric_id == "cf2_pf_decay_curve":
         return [check_cf2_result(result, cfg)]
+    if metric_id == "bf3_confidence_progression":
+        reports = [check_span_metadata(result, metric_id, cfg)]
+        if result.get("curve") is not None:
+            reports.append(check_bf3_curve(
+                result["curve"], result.get("model", "unknown"),
+                cfg, source="standalone"
+            ))
+        return reports
+    if metric_id == "pf3_attention_distance":
+        reports = [check_span_metadata(result, metric_id, cfg)]
+        if result.get("curve") is not None:
+            reports.append(check_pf3_curve(
+                result["curve"], result.get("model", "unknown"),
+                cfg, source="standalone"
+            ))
+        return reports
     return []
 
 

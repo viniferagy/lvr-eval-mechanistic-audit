@@ -203,16 +203,21 @@ def run_ablation_sweep(wrapper, samples: list[ProbeSample],
 @torch.no_grad()
 def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
                                 cfg: dict, model_tag: str) -> dict:
-    """Targeted BF-1 first pass: ablate adapter query span and read BF-3."""
+    """Targeted BF-1: ablate adapter query span and read BF-3/PF-3."""
     from . import internal_metrics as IM
 
     bf1 = cfg["bf1"]
     mode = bf1["mode"]
     noise_std = bf1.get("noise_std", 0.1)
+    do_pf3 = bool(bf1.get("readout_pf3", True))
     bf3_key = bf1.get("bf3_scalar", "early_to_late_drop")
+    pf3_key = bf1.get("pf3_scalar", "mean_kl")
+    pf3_mode = cfg.get("pf3", {}).get("corruption_mode", "mask_50pct")
+    pf3_seeds = int(cfg.get("pf3", {}).get("num_seeds", 3))
     layer_ids = bf1.get("layers") or list(range(wrapper.n_layers))
 
     prepared = []
+    baseline_pf3_curves = []
     skip_reasons: dict[str, int] = {}
     query_target_counts: dict[str, int] = {}
     for s in samples:
@@ -230,6 +235,7 @@ def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
             meta = IM._span_payload(spans, query_span)  # internal JSON-safe helper
             prepared.append({
                 "id": s.id,
+                "sample": s,
                 "inputs": inputs,
                 "query_span": query_span,
                 "baseline_curve": curve,
@@ -241,6 +247,20 @@ def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
             reason = type(exc).__name__
             skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
             logger.debug("targeted bf1 prepare fail: %s", exc)
+            continue
+
+        if do_pf3:
+            try:
+                pf3_meta = IM.pf3_curve_with_meta_from_sample(
+                    wrapper,
+                    s,
+                    corruption_mode=pf3_mode,
+                    num_seeds=pf3_seeds,
+                )
+                if pf3_meta["curve"] is not None:
+                    baseline_pf3_curves.append(pf3_meta["curve"])
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("targeted bf1 baseline pf3 fail: %s", exc)
 
     if prepared:
         baseline_curve = np.mean(
@@ -260,6 +280,10 @@ def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
                 "examples": [rec["span_meta"] for rec in prepared[:5]],
             },
         }
+        if baseline_pf3_curves:
+            baseline_pf3_curve = np.mean(np.stack(baseline_pf3_curves), axis=0)
+            baseline["pf3_curve"] = baseline_pf3_curve.tolist()
+            baseline["pf3"] = IM.pf3_reduce(baseline_pf3_curve)
     else:
         baseline = {
             "span_metadata": {
@@ -275,7 +299,8 @@ def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
 
     results = []
     for li in layer_ids:
-        curves = []
+        bf3_curves = []
+        pf3_curves = []
         for rec in prepared:
             try:
                 with ablate_layer(
@@ -291,7 +316,7 @@ def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
                         output_attentions=False,
                         return_dict=True,
                     )
-                curves.append(
+                bf3_curves.append(
                     IM.bf3_curve_from_inputs(
                         wrapper,
                         rec["inputs"],
@@ -300,26 +325,60 @@ def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
                     )
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.debug("targeted bf1 layer %s fail: %s", li, exc)
+                logger.debug("targeted bf1 layer %s bf3 fail: %s", li, exc)
 
-        rec_out = {"layer": li, "bf3": None, "bf3_curve": None, "delta": {}}
-        if curves and baseline.get("bf3"):
-            m = np.mean(np.stack(curves), axis=0)
+            if do_pf3:
+                try:
+                    with ablate_layer(
+                        wrapper,
+                        li,
+                        mode,
+                        noise_std,
+                        token_span=rec["query_span"],
+                    ):
+                        pf3_meta = IM.pf3_curve_with_meta_from_sample(
+                            wrapper,
+                            rec["sample"],
+                            corruption_mode=pf3_mode,
+                            num_seeds=pf3_seeds,
+                        )
+                    if pf3_meta["curve"] is not None:
+                        pf3_curves.append(pf3_meta["curve"])
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("targeted bf1 layer %s pf3 fail: %s", li, exc)
+
+        rec_out = {
+            "layer": li,
+            "bf3": None,
+            "pf3": None,
+            "bf3_curve": None,
+            "pf3_curve": None,
+            "delta": {},
+        }
+        if bf3_curves and baseline.get("bf3"):
+            m = np.mean(np.stack(bf3_curves), axis=0)
             rec_out["bf3_curve"] = m.tolist()
             rec_out["bf3"] = IM.bf3_reduce(m)
             rec_out["delta"]["bf3"] = baseline["bf3"][bf3_key] - rec_out["bf3"][bf3_key]
+        if pf3_curves and baseline.get("pf3"):
+            m = np.mean(np.stack(pf3_curves), axis=0)
+            rec_out["pf3_curve"] = m.tolist()
+            rec_out["pf3"] = IM.pf3_reduce(m)
+            rec_out["delta"]["pf3"] = baseline["pf3"][pf3_key] - rec_out["pf3"][pf3_key]
         results.append(rec_out)
-        logger.info("[%s] targeted layer %02d/%d Δbf3(%s)=%s",
+        logger.info("[%s] targeted layer %02d/%d Δbf3(%s)=%s Δpf3(%s)=%s",
                     model_tag, li, wrapper.n_layers, bf3_key,
-                    rec_out["delta"].get("bf3"))
+                    rec_out["delta"].get("bf3"), pf3_key,
+                    rec_out["delta"].get("pf3"))
 
     return {
         "model": model_tag,
         "mode": mode,
         "n_layers": wrapper.n_layers,
         "ablation_target": "adapter_preferred_query_span",
-        "readout": "bf3",
+        "readout": "bf3_pf3" if do_pf3 else "bf3",
         "bf3_scalar": bf3_key,
+        "pf3_scalar": pf3_key,
         "baseline": baseline,
         "layers": results,
     }

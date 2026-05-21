@@ -26,7 +26,8 @@ from pipeline.adapters.qwen_vl import QwenVLAdapter
 from pipeline.adapters.lvr_qwen import LVRQwenAdapter
 from pipeline.data import load_probe_set
 from pipeline.internal_metrics import corrupt_image, get_post_image_text_span
-from pipeline.metrics import list_metrics, resolve_readout
+from pipeline.metrics import list_metrics, list_runnable_metrics, resolve_readout
+from pipeline.metrics.lvr_generation_trace import run as run_lvr_trace_metric
 from pipeline.results import make_metric_result
 from pipeline.degradation import curve_features
 from pipeline.analysis import run_analysis
@@ -120,8 +121,11 @@ def test_spans():
 def test_reductions():
     print("\n== 3. curve 归约 + 特征 ==")
     metric_ids = {m.metric_id for m in list_metrics()}
+    runnable_ids = {m.metric_id for m in list_runnable_metrics()}
     assert "bf3_confidence_progression" in metric_ids
     assert "pf3_attention_distance" in metric_ids
+    assert "bf3_confidence_progression" in runnable_ids
+    assert "pf3_attention_distance" in runnable_ids
     bf3_reduce = resolve_readout("bf3").require_reduce()
     pf3_reduce = resolve_readout("pf3").require_reduce()
     bf3 = np.linspace(6.0, 1.0, 28)            # entropy 早高末低
@@ -223,6 +227,20 @@ def test_lvr_json_loader():
     assert s.source_dataset == "flickr30k"
     print("  LVR JSON list -> ProbeSample with lvr metadata ok")
 
+    missing_lvr_path = os.path.join(out_dir, "missing_lvr.json")
+    data[0]["conversations"][1]["value"] = "<answer>dark blue denim shorts</answer>"
+    with open(missing_lvr_path, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    samples = load_probe_set({
+        "source_type": "lvr_json",
+        "json_path": missing_lvr_path,
+        "image_root": out_dir,
+        "max_samples": 10,
+        "skip_missing_images": False,
+    })
+    assert samples == []
+    print("  missing assistant-side <lvr> skipped by default -> ok")
+
 
 def test_lvr_assistant_expansion():
     print("\n== 6. LVR assistant expansion ==")
@@ -241,6 +259,31 @@ def test_lvr_assistant_expansion():
     assert "<|lvr_end|>" in text
     assert "<|lvr_latent_end|>" not in text
     assert "<answer>B</answer>" in text
+
+    multi_sample = SimpleNamespace(
+        lvr_assistant="<lvr>\nmid\n<lvr>\n<answer>B</answer>",
+        answer="B",
+    )
+    multi_text = adapter._teacher_forced_assistant_text(wrapper, multi_sample)
+    assert "<lvr>" not in multi_text
+    assert multi_text.count("<|lvr_start|>") == 2
+    assert multi_text.count("<|lvr|>") == 6
+
+    missing_sample = SimpleNamespace(
+        lvr_assistant="<answer>B</answer>",
+        answer="B",
+    )
+    try:
+        adapter._teacher_forced_assistant_text(wrapper, missing_sample)
+        raise AssertionError("missing <lvr> should fail by default")
+    except ValueError as exc:
+        assert "requires sample.lvr_assistant containing <lvr>" in str(exc)
+
+    debug_wrapper = SimpleNamespace(
+        cfg={"audit": {"lvr_num_tokens": 3, "allow_synthetic_lvr_assistant": True}}
+    )
+    debug_text = adapter._teacher_forced_assistant_text(debug_wrapper, missing_sample)
+    assert debug_text == expected
 
     bad_wrapper = SimpleNamespace(
         cfg={
@@ -297,6 +340,39 @@ def test_lvr_trace_position_extraction():
     print("  latent_end marker excluded from <|lvr|> positions -> ok")
 
 
+def test_lvr_trace_metric_payload():
+    print("\n== 8. LVR trace metric payload fields ==")
+
+    class FakeAdapter:
+        def generate_with_trace(self, wrapper, image, question, **kwargs):
+            return {
+                "generated_text": "B",
+                "lvr_generated_positions": [3, 4],
+                "lvr_token_positions": [3, 4],
+                "lvr_latent_end_positions": [5],
+                "lvr_block_spans": [[2, 7]],
+                "unexpected_lvr_inner_positions": [],
+                "trace_quality": "unit",
+                "notes": {"kwargs": kwargs},
+            }
+
+    wrapper = SimpleNamespace(adapter=FakeAdapter())
+    sample = SimpleNamespace(id="s0", image=make_img(), question="Q?")
+    result = run_lvr_trace_metric(
+        wrapper,
+        [sample],
+        {"audit": {"lvr_decoding_strategy": "steps", "lvr_steps": 3}},
+        "fake_lvr",
+    )
+    rec = result["samples"][0]
+    assert rec["lvr_generated_positions"] == [3, 4]
+    assert rec["lvr_token_positions"] == [3, 4]
+    assert rec["lvr_latent_end_positions"] == [5]
+    assert rec["lvr_block_spans"] == [[2, 7]]
+    assert rec["unexpected_lvr_inner_positions"] == []
+    print("  trace metric preserves latent_end/block metadata -> ok")
+
+
 def fake_bf1(tag, n_layers=28, strength=1.0):
     rng = np.random.default_rng(hash(tag) % 2**31)
     base_bf3 = np.linspace(6, 1, n_layers)
@@ -334,7 +410,7 @@ def fake_cf2(tag, robust=1.0):
 
 
 def test_end_to_end():
-    print("\n== 8. sanity + 端到端 analysis(合成数据) ==")
+    print("\n== 9. sanity + 端到端 analysis(合成数据) ==")
     ablation = {
         "qwen2_5_vl_7b": fake_bf1("qwen2_5_vl_7b", strength=1.4),
         "lvr_7b": fake_bf1("lvr_7b", strength=0.7),
@@ -379,6 +455,7 @@ def main():
     test_lvr_json_loader()
     test_lvr_assistant_expansion()
     test_lvr_trace_position_extraction()
+    test_lvr_trace_metric_payload()
     test_end_to_end()
     print("\nSMOKE TEST PASSED ✅")
 

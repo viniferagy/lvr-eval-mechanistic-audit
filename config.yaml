@@ -40,6 +40,7 @@ audit:
   lvr_num_tokens: 16            # teacher_forced 时把官方 <lvr> 展开成多少个 <|lvr|>
   lvr_include_latent_end_token: false
   allow_lvr_fallback_to_answer_probe: false
+  allow_synthetic_lvr_assistant: false
   lvr_decoding_strategy: "steps"
   lvr_steps: 16
 
@@ -65,6 +66,7 @@ data:
   max_samples: 50                # 内部指标 + eager attention 偏重, 默认 30
   shuffle_seed: 0
   skip_missing_images: true       # LVR 图像下载未完成时先跳过缺失样本
+  require_lvr_placeholder: true   # source_type=lvr_json 时要求 assistant 侧含 <lvr>
 
 inference:
   dtype: "bfloat16"

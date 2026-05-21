@@ -214,6 +214,7 @@ def _load_lvr_json(cfg: dict) -> list[ProbeSample]:
     path = cfg["json_path"]
     image_root = cfg.get("image_root", "")
     max_records = cfg.get("max_records_before_sampling")
+    require_lvr_placeholder = bool(cfg.get("require_lvr_placeholder", True))
 
     with open(path, "r", encoding="utf-8") as f:
         records = json.load(f)
@@ -242,6 +243,9 @@ def _load_lvr_json(cfg: dict) -> list[ProbeSample]:
 
         human_value = str(human.get("value", human.get("content", "")))
         assistant_value = str(assistant.get("value", assistant.get("content", "")))
+        if require_lvr_placeholder and "<lvr>" not in assistant_value:
+            logger.debug("skip LVR record %s: assistant missing <lvr>", i)
+            continue
 
         question = _strip_image_placeholder(human_value)
         answer = _extract_answer_from_lvr_assistant(assistant_value)

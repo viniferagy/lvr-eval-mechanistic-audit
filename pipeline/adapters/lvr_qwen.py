@@ -138,9 +138,17 @@ class LVRQwenAdapter(QwenVLAdapter):
         return self.lvr_start_token + self.lvr_token * n + self.lvr_end_token
 
     def _teacher_forced_assistant_text(self, wrapper, sample) -> str:
+        cfg = getattr(wrapper, "cfg", {}) or {}
+        audit_cfg = cfg.get("audit", {}) if isinstance(cfg, dict) else {}
         assistant = sample.lvr_assistant or ""
         if "<lvr>" in assistant:
-            return assistant.replace("<lvr>", self._make_lvr_sequence(wrapper, sample), 1)
+            return assistant.replace("<lvr>", self._make_lvr_sequence(wrapper, sample))
+
+        if not bool(audit_cfg.get("allow_synthetic_lvr_assistant", False)):
+            raise ValueError(
+                "LVR teacher_forced mode requires sample.lvr_assistant containing <lvr>. "
+                "Set audit.allow_synthetic_lvr_assistant=true only for debugging."
+            )
 
         answer = sample.answer or ""
         return f"{self._make_lvr_sequence(wrapper, sample)}\n<answer>{answer}</answer>"
@@ -317,7 +325,9 @@ class LVRQwenAdapter(QwenVLAdapter):
             return_tensors="pt",
         ).to(wrapper.model.device)
 
-        spans = self.get_spans(wrapper, inputs)
+        # Generation prompts do not contain teacher-forced <|lvr|> placeholders.
+        # Use baseline prompt spans here; generated LVR state is traced below.
+        spans = super().get_spans(wrapper, inputs)
         gen = wrapper.model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,

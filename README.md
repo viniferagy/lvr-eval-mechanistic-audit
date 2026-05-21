@@ -110,8 +110,8 @@ metric 使用 `spans.preferred_query_span()` 选择 query side：
 - 类型：sweep。
 - 默认行为：targeted span ablation。
 - 输入：adapter `preferred_query_span()`。
-- 输出：逐层 targeted ablation 后的 BF-3 readout 变化。
-- 主要标量：`delta.bf3`。
+- 输出：逐层 targeted ablation 后的 BF-3/PF-3 readout 变化。
+- 主要标量：`delta.bf3`、`delta.pf3`。
 - 语义：估计各 decoder layer 对审计 query span 的 causal contribution。
 
 `bf1_layer_ablation`
@@ -170,6 +170,7 @@ audit:
   lvr_num_tokens: 16
   lvr_include_latent_end_token: false
   allow_lvr_fallback_to_answer_probe: false
+  allow_synthetic_lvr_assistant: false
   lvr_decoding_strategy: "steps"
   lvr_steps: 16
 ```
@@ -183,6 +184,7 @@ data:
   image_root: "./data/images"
   max_samples: 50
   skip_missing_images: true
+  require_lvr_placeholder: true
 ```
 
 `lvr_json` loader 读取官方 LLaVA-style list record，并保留完整 metadata：
@@ -213,6 +215,8 @@ where `N = audit.lvr_num_tokens`.
 Important: this fixed-token branch does **not** insert `<|lvr_latent_end|>`. The official code only inserts `<|lvr_latent_end|>` in the dynamic token-index branch, when `fixed_num_of_lvr_tokens is None` and `latent_end_token` is enabled. This repo currently does not implement that dynamic `lvr_token_idxs_list` branch.
 
 `lvr_latent_end_token` is still configured and its token id is still resolved, because the official model defines it and generation-time traces may encounter it. `allow_lvr_fallback_to_answer_probe=false` 时，如果 LVR teacher-forced 输入中没有产生 `<|lvr|>` span，run 会 fail，而不是悄悄退回 answer-probe control。
+
+By default, LVR teacher-forced mode also requires `sample.lvr_assistant` to contain an official assistant-side `<lvr>` placeholder. `allow_synthetic_lvr_assistant=false` prevents ordinary VQA samples from being silently converted into fake LVR examples. The `lvr_json` loader likewise defaults to `require_lvr_placeholder=true` and skips records whose assistant message has no `<lvr>`.
 
 metric 开关：
 
@@ -247,11 +251,14 @@ python smoke_test.py
 
 ```bash
 python run_all.py --config config.yaml --models qwen2_5_vl_7b lvr_7b
+python run_all.py --config config.yaml --models lvr_7b --only bf3 pf3
 python run_all.py --config config.yaml --models qwen2_5_vl_7b --only bf1
 python run_all.py --config config.yaml --models lvr_7b --only cf2_pf_decay_curve
 python run_all.py --config config.yaml --models lvr_7b --only lvr_trace
 python run_all.py --config config.yaml --models qwen2_5_vl_7b --no-sanity
 ```
+
+`lvr_trace` uses generation-time prompts, so it records generated LVR block positions rather than requiring teacher-forced `<|lvr|>` placeholders in the prompt. It can be launched with the default config; the trace adapter treats prompt spans as baseline controls and stores generated LVR positions separately.
 
 服务器上需要 GPU 独占时，GPU 命令统一走 wrapper：
 

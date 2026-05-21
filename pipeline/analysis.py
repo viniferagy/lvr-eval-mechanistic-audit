@@ -280,6 +280,9 @@ def plot_generic_metric_results(metric_results: list[dict], out_dir: str):
                 if key.endswith("_curve"):
                     plot_generic_curve(metric_id, model, f"baseline_{key}", value, generic_dir)
 
+        if payload.get("curve") is not None:
+            plot_generic_curve(metric_id, model, "curve", payload.get("curve"), generic_dir)
+
         plot_generic_layer_deltas(metric_id, model, payload, generic_dir)
 
         families = payload.get("families")
