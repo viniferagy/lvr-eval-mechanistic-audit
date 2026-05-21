@@ -1,154 +1,323 @@
-# LVR-Eval :: LVR Mechanistic Audit
+# LVR-Eval Mechanistic Audit
 
-VLM 内部机制审计 pipeline。在你已有的两个 **model-internal、逐层** 指标
-（BF-3 / PF-3）之上，新增 **BF-1（targeted span ablation）** 与 **CF-2（PF 衰减曲线）**，
-并把它们联动成 radar + 相关性分析。
+`lvr-eval-mechanistic-audit` 是一个面向 VLM/LVR 的内部机制审计框架。它把模型、数据集、审计 span、metric、sanity check 和 analysis 拆成清晰的模块，让 Qwen baseline 与 LVR 模型可以在同一套 runner 中比较。
 
-模型矩阵：`qwen2_5_vl_7b`、`lvr_7b`、`qwen2_5_vl_3b`。
-旧 tag `M0`、`M2`、`M0_small` 仍会通过 `model_aliases` 自动映射。
+核心原则：
 
----
+- metric 都是 `pipeline/metrics/` 下的平级模块，通过 registry 调度。
+- metric 不直接猜 token layout，而是通过 adapter 返回的 `AuditSpans` 定位审计对象。
+- Qwen baseline 没有 latent tokens，只使用 `answer_probe_pos` 作为 control query span。
+- LVR teacher-forced 审计使用 `<|lvr|>` placeholder positions。
+- LVR inference-time 审计应使用 generation trace 中的 continuous latent state，例如 `lvr_mode_switch` 与 `last_position_hidden_state`。
+- `<|image_pad|>` 之后的文本不是 LVR latent；旧 post-image text helper 只保留作历史结果调试。
 
-## Correct LVR Audit Semantics
-
-- Qwen baseline has no latent tokens; it uses `answer_probe_pos` as a control query span.
-- LVR teacher-forced audit uses `<|lvr|>` placeholder positions.
-- LVR inference-time audit uses generation trace: `lvr_mode_switch` and `last_position_hidden_state`; the current trace metric stores an approximate first-pass trace from generated token ids and marks it as such.
-- The legacy post-image text span is not a latent span and is retained only as `get_post_image_text_span()` for debugging old results.
-
----
-
-## BF-3 / PF-3 是怎么接进来的
-
-你上传的 `bf3_today.py` / `pf3_today.py` 的**核心**已移植进
-`pipeline/internal_metrics.py`（去掉 CLI 和数据加载，重构成作用于 `VLMWrapper`
-的可复用函数）。现在正式入口在 `pipeline/metrics/` registry，`internal_metrics.py`
-保留为兼容 facade 和底层实现，逐项对应如下：
-
-| 原文件 | 移植后 | 说明 |
-|---|---|---|
-| `logit_lens_entropy` | `internal_metrics.logit_lens_entropy` | 用 wrapper 缓存的 `final_norm`/`lm_head`（探测 `model.model.norm` 等多路径） |
-| `compute_bf3_curve` | `internal_metrics.bf3_curve` | adapter query span 末端的逐层 entropy curve；`output_hidden_states=True` |
-| image/query token span | `adapter.get_spans()` | Qwen=`answer_probe_pos` control；LVR teacher-forced=`<|lvr|>` placeholder |
-| `random_patch_mask`/`patch_shuffle`/`corrupt_image` | 同名 | 另加 `severity` 形参供 CF-2 连续扫描 |
-| `kl_divergence_safe`/`compute_attention_distance` | `_kl_safe`/`pf3_curve` | intact vs corrupted 的 query_span→image attention KL；eager attention |
-
-关键设计：BF-3/PF-3 的 forward 都是**普通 forward**。BF-1 把 ablation hook
-挂上后再调用它们，算出的 curve 自动反映“消融后”的内部状态 —— 这就是 BF-1 与
-BF-3/PF-3 的联动机制。模型加载时强制 `attn_implementation="eager"`（PF-3 取
-attention 必须），并缓存 `final_norm`/`lm_head`/`image_pad_id`。
-
----
-
-## BF-1 与 CF-2 的读出方式
-
-**BF-1 Targeted Span Ablation** — 默认 `bf1_latent_ablation` 先由 adapter 定位
-`preferred_query_span()`，再只在该 span 上逐层挂 hook（`identity`/`zero`/`mean`/`noise`），
-第一版 targeted readout 重算 BF-3 curve：
-- `Δbf3 = baseline.early_to_late_drop − ablated.early_to_late_drop`（该层对 confidence sharpening 的贡献）
-
-正值越大 = 该层越关键。同时保留每个消融配置下重算的完整 curve。旧整层 sweep
-保留为 `bf1_layer_ablation` / `--only bf1_layer`，不再作为默认 latent ablation。
-
-**CF-2 PF Decay Curve** — 把 PF-3 的离散 corruption 推广到 severity 连续轴：
-- `readout: pf3`（默认，也可写 `pf3_attention_distance`）：x=severity，y=PF-3 `mean_kl`（intact vs corrupted-at-s）。severity↑ 通常 KL↑。
-- `readout: bf3`（也可写 `bf3_confidence_progression`）：把退化图喂给 BF-3，y=final-layer entropy。
-拟合 `auc` / `char_severity`（半程 severity）/ `rel_change`。
-
-**联动 radar**：BF-1 criticality（层 Δ 的最大绝对值）/ BF-3 sharpening（baseline）/
-PF-3 modality-dep（baseline）/ CF-2 AUC（各 family 均值）；外加关键层
-Δbf3~Δpf3 的 Spearman。
-
----
-
-## 目录
+**Architecture**
 
 ```
-lvr_eval/
-├── config.yaml                # 模型路径 / 数据 / PF-3 / BF-1 / CF-2 设置
-├── run_all.py                 # registry-driven 端到端入口
-├── launch_sharded.sh          # 4×4090：模型×阶段 4 个 job
-├── merge_and_analyze.py       # 收集 sharded 产出统一出图
-├── smoke_test.py              # 无真实模型验证非模型逻辑、span 语义、severity=0
-├── tools/                     # GPU reservation wrapper / holder
+lvr-eval-mechanistic-audit/
+├── config.yaml
+├── run_all.py
+├── launch_sharded.sh
+├── merge_and_analyze.py
+├── smoke_test.py
+├── tools/
 │   ├── run_and_hold.sh
 │   └── hold_gpu.py
 ├── docs/
 │   └── validation_report.md
 └── pipeline/
-    ├── metrics/               # ★ 平级指标模块 + registry
+    ├── adapters/
+    │   ├── base.py
+    │   ├── qwen_vl.py
+    │   ├── lvr_qwen.py
+    │   ├── spans.py
+    │   └── registry.py
+    ├── metrics/
     │   ├── bf3_confidence_progression.py
     │   ├── pf3_attention_distance.py
     │   ├── bf1_latent_ablation.py
     │   ├── bf1_layer_ablation.py
+    │   ├── cf2_pf_decay_curve.py
     │   ├── lvr_generation_trace.py
-    │   └── cf2_pf_decay_curve.py
-    ├── adapters/              # VLMAdapter：模型加载/输入构造/generate 扩展点
-    ├── internal_metrics.py    # BF-3 / PF-3 底层兼容 facade + corruption
-    ├── model_utils.py         # 加载(eager) + layer/norm/head/image_pad 探测 + forward
-    ├── ablation.py            # BF-1：hook + 逐层重算 BF-3/PF-3
-    ├── degradation.py         # CF-2：severity 扫描 + 曲线拟合
-    ├── sanity/                # BF-3/PF-3/BF-1/CF-2 sanity reports
-    ├── data.py                # probe 数据集（jsonl / HF）
-    └── analysis.py            # 折线/热力图/decay/radar/spearman
+    │   └── registry.py
+    ├── sanity/
+    ├── data.py
+    ├── model_utils.py
+    ├── internal_metrics.py
+    ├── ablation.py
+    ├── degradation.py
+    ├── results.py
+    └── analysis.py
 ```
 
----
+`run_all.py` 负责读取 config、加载 probe set、加载模型、执行选中的 metric、写统一 result envelope、运行 sanity check，并调用 analysis。`launch_sharded.sh` 用于多 GPU 分片运行；`merge_and_analyze.py` 用于合并 sharded 输出并重新生成 sanity/analysis artifact。
 
-## 上手
+**Adapters**
+
+Adapters 是模型语义边界。metric 只依赖 wrapper 与 adapter，不直接解析 prompt token。
+
+`QwenVLAdapter`：
+
+- 适用于 `qwen2_5_vl` / `qwen3_vl` / `auto`。
+- 通过 `<|image_pad|>` 定位 image token span。
+- 返回 `latent_tokens=None`。
+- 返回 `answer_probe_pos` 作为 baseline control query span。
+
+`LVRQwenAdapter`：
+
+- 适用于 `lvr_qwen2_5_vl` / `lvr` / `qwen_lvr`。
+- 使用官方 `QwenWithLVR` 与 LVR monkey patch 加载路径。
+- 识别 `lvr_start_id`、`lvr_id`、`lvr_latent_end_id`、`lvr_end_id`。
+- teacher-forced 模式下通过 `<|lvr|>` token 定位 `lvr_placeholder_tokens`。
+- `generate_with_trace()` 提供 inference-time trace 的第一版入口；当前 trace quality 标记为 approximate，后续应直接 instrument 官方 generation loop。
+
+`AuditSpans` 位于 `pipeline/adapters/spans.py`：
+
+- `image_tokens`
+- `question_tokens`
+- `lvr_placeholder_tokens`
+- `latent_tokens`
+- `answer_probe_pos`
+
+metric 使用 `spans.preferred_query_span()` 选择 query side：
+
+- LVR latent/placeholder 优先。
+- Qwen fallback 到 `answer_probe_pos`。
+- 无有效 query span 时直接报错。
+
+**Metrics**
+
+所有 metric 都是 registry 下的同级模块，既可以单独运行，也可以被 analysis 汇总。
+
+`bf3_confidence_progression`
+
+- 类型：internal curve readout。
+- 输入：adapter query span。
+- 输出：逐层 logit-lens entropy curve。
+- 主要标量：`early_to_late_drop`、`final_entropy`、`mean_entropy`。
+- 语义：观察 query position 的 confidence sharpening 是否随 decoder layer 推进。
+
+`pf3_attention_distance`
+
+- 类型：internal curve readout。
+- 输入：query span 与 image token span。
+- 输出：intact image 与 corrupted image 的 query-to-image attention KL curve。
+- 主要标量：`mean_kl`、`mid_kl`、`peak_kl`。
+- 语义：观察 query representation 对视觉证据扰动的内部注意力敏感度。
+
+`bf1_latent_ablation`
+
+- 类型：sweep。
+- 默认行为：targeted span ablation。
+- 输入：adapter `preferred_query_span()`。
+- 输出：逐层 targeted ablation 后的 BF-3 readout 变化。
+- 主要标量：`delta.bf3`。
+- 语义：估计各 decoder layer 对审计 query span 的 causal contribution。
+
+`bf1_layer_ablation`
+
+- 类型：sweep。
+- 默认关闭。
+- 行为：legacy whole-layer ablation。
+- 用途：保留旧整层消融对照；不作为默认 latent ablation 解释。
+
+`cf2_pf_decay_curve`
+
+- 类型：sweep。
+- 输入：corruption family 与 severity list。
+- 输出：severity 轴上的 readout curve。
+- 默认 readout：`pf3_attention_distance`。
+- 主要特征：`auc`、`char_severity`、`rel_change`。
+- 语义：观察内部视觉依赖信号如何随图像退化而变化。
+
+`lvr_generation_trace`
+
+- 类型：trace。
+- 输入：LVR adapter 的 `generate_with_trace()`。
+- 输出：generated text、LVR token positions、trace quality、trace notes。
+- 用途：为 inference-time LVR 审计保存生成轨迹。当前版本是第一版 trace 接口，长期版本应直接记录每一步 `lvr_mode_switch` 和 `last_position_hidden_state`。
+
+**Config**
+
+模型配置示例：
+
+```yaml
+models:
+  qwen2_5_vl_7b:
+    name: "Qwen2.5-VL-7B"
+    path: "./models/Qwen/Qwen2___5-VL-7B-Instruct"
+    arch: "qwen2_5_vl"
+    image_pad_token: "<|image_pad|>"
+
+  lvr_7b:
+    name: "LVR-7B"
+    path: "./models/LVR-7B"
+    arch: "lvr_qwen2_5_vl"
+    image_pad_token: "<|image_pad|>"
+    lvr_start_token: "<|lvr_start|>"
+    lvr_token: "<|lvr|>"
+    lvr_latent_end_token: "<|lvr_latent_end|>"
+    lvr_end_token: "<|lvr_end|>"
+```
+
+审计配置：
+
+```yaml
+audit:
+  mode: "teacher_forced"
+  query_target: "auto"
+  lvr_decoding_strategy: "steps"
+  lvr_steps: 16
+```
+
+metric 开关：
+
+```yaml
+metrics:
+  bf3_confidence_progression:
+    enabled: true
+  pf3_attention_distance:
+    enabled: true
+  bf1_latent_ablation:
+    enabled: true
+  bf1_layer_ablation:
+    enabled: false
+  cf2_pf_decay_curve:
+    enabled: true
+  lvr_generation_trace:
+    enabled: false
+```
+
+`all` 只运行 enabled metric。显式 `--only bf1_layer` 或 `--only lvr_trace` 会运行对应 metric，即使它默认 disabled。
+
+**Run**
+
+安装依赖并先跑 smoke：
 
 ```bash
 pip install -r requirements.txt
-python smoke_test.py                      # 先验证接线（不需要 GPU）
+python smoke_test.py
 ```
 
-改 `config.yaml`：
-- `models.*.path`：`qwen2_5_vl_7b` / `lvr_7b` / `qwen2_5_vl_3b` 权重路径；LVR 使用 `arch: lvr_qwen2_5_vl`
-- `data`：指向你的 audit 集（jsonl 或 HF；**PF-3 不能用 synthetic 图**）
-- `data.field_map`：配置数据集字段映射，支持 `image` / `question` / `answer` / `id`，也支持 `meta.id` 点路径和字段 fallback 列表
-- 如 LVR 的 image/LVR special token 不同，改 `models.lvr_7b.image_pad_token` 与 `lvr_*_token`
-- `metrics.*.enabled`：统一指标开关；旧的 `bf1.enabled` / `cf2.enabled` 仍作为 fallback 兼容一轮
+常用命令：
 
 ```bash
 python run_all.py --config config.yaml --models qwen2_5_vl_7b lvr_7b
-python run_all.py --config config.yaml --models qwen2_5_vl_7b lvr_7b --only bf1
+python run_all.py --config config.yaml --models qwen2_5_vl_7b --only bf1
 python run_all.py --config config.yaml --models lvr_7b --only cf2_pf_decay_curve
+python run_all.py --config config.yaml --models lvr_7b --only lvr_trace
 python run_all.py --config config.yaml --models qwen2_5_vl_7b --no-sanity
-bash launch_sharded.sh
 ```
 
-服务器上需要 GPU 独占时，所有 GPU 命令通过 wrapper 入口运行：
+服务器上需要 GPU 独占时，GPU 命令统一走 wrapper：
 
 ```bash
 bash tools/run_and_hold.sh 0,1,2,3 launch_sharded.sh
 bash tools/run_and_hold.sh 0,1,2,3 ../.venv/bin/python merge_and_analyze.py --dir runs/<run>
 ```
 
-`tools/hold_gpu.py` 会在命令结束后重新占住可见 GPU，并周期性自动扩张 ballast，
-因此其他进程释放显存后会被 holder 在后续扩张周期内占用。
+`tools/hold_gpu.py` 会在命令结束后重新 hold 可见 GPU，并周期性自动扩张 ballast。
 
-每个 metric 会同时写旧格式结果（如 `bf1_lvr_7b.json`）和统一 envelope：
-`runs/<run_name>/metrics/<metric_id>_<model>.json`。
-analysis 会优先理解这些统一 envelope，并额外写出:
+**Outputs**
+
+每个 metric 会写统一 envelope：
+
+```text
+runs/<run>/metrics/<metric_id>_<model>.json
+```
+
+兼容历史 analysis 的 metric 也会写 legacy result：
+
+```text
+runs/<run>/bf1_<model>.json
+runs/<run>/cf2_<model>.json
+```
+
+analysis 输出：
+
+- `summary.json`
+- `rank_correlation.json`
+- `radar_4metric.png`
+- `bf1_layerwise_bf3.png`
+- `bf1_baseline_bf3_curve.png`
+- `cf2_decay_<family>.png`
 - `metric_results_summary.json`
-- `metric_plots/*.png`（按 `metric_id/model` 组织的通用曲线/标量图）
+- `metric_plots/*.png`
 
-每次 run 默认会在 `runs/<run_name>/sanity/` 下写出:
-- `bf1_latent_ablation_*_sanity.json`
-- `bf3_confidence_progression_*_sanity.json`（来自 BF-1 baseline）
-- `pf3_attention_distance_*_sanity.json`（来自 BF-1 baseline）
-- `cf2_pf_decay_curve_*_sanity.json`
-- `summary_sanity.json`
+BF-1/CF-2 payload 会记录 span metadata：
 
----
+```json
+{
+  "query_target_kind": "lvr_placeholder_tokens",
+  "query_span": [3, 6],
+  "image_span": [0, 2],
+  "adapter_notes": {}
+}
+```
 
-## 验证 / 注意
+聚合结果还会记录：
 
-- `smoke_test.py` 覆盖：corruption 算子、curve 归约、AUC/char_severity（升降型）、
-  data field_map、sanity report，以及统一 MetricResult → analysis 出全套图。**已通过 ✅**
-- BF-3/PF-3 的真实 forward 需要 GPU + 权重，无法在 CPU 验证，但核心逻辑是从你的
-  原脚本移植并修正为 adapter span 语义，不再把 `<|image_pad|>` 后文本当成 LVR latent。
-- 内部指标走**单样本 forward**（hidden_states / attentions），不走 batch generate；
-  PF-3 + eager attention 偏重，`data.max_samples` 默认 30，按需调。
-- 新增模型时优先在 `pipeline/adapters/` 注册新的 adapter；metric 代码只依赖 `VLMWrapper.build_inputs()` / `generate()`。
-- 每个 BF-1/CF-2 payload 会记录 `query_target_kind`、`query_span`、`image_span` 和 `adapter_notes`，用于确认审计目标不是 post-image text。
+```json
+{
+  "n_total": 50,
+  "n_success": 48,
+  "n_skipped": 2,
+  "skip_reasons": {},
+  "query_target_counts": {
+    "lvr_placeholder_tokens": 48
+  }
+}
+```
+
+**Sanity Checks**
+
+默认运行 sanity，并写入：
+
+```text
+runs/<run>/sanity/
+```
+
+覆盖内容：
+
+- BF-3 curve length、finite、entropy drop、monotonicity。
+- PF-3 KL non-negative、nonzero signal、mid-layer signal。
+- BF-1 baseline/layer result/delta 是否存在且非零。
+- CF-2 severity axis、finite curve、severity=0 clean baseline、trend。
+- span metadata valid rate、Qwen `answer_probe_pos`、LVR `<|lvr|>` placeholder、query/image span 不混淆。
+
+`validation.fail_fast: true` 时 sanity fail 会让 run 以非零退出；默认只 warning。
+
+**Validation**
+
+当前无模型 smoke 覆盖：
+
+- corruption operators。
+- severity=0 clean baseline。
+- Qwen baseline span semantics。
+- LVR teacher-forced span semantics。
+- registry metric aliases。
+- curve reductions。
+- data field mapping。
+- sanity reports。
+- unified MetricResult 到 analysis artifacts。
+
+运行：
+
+```bash
+python -m py_compile run_all.py smoke_test.py merge_and_analyze.py pipeline/*.py pipeline/sanity/*.py pipeline/metrics/*.py pipeline/adapters/*.py
+python smoke_test.py
+```
+
+完整服务器验证记录见：
+
+```text
+docs/validation_report.md
+```
+
+**Notes**
+
+- 真实 BF-3/PF-3/BF-1/CF-2 forward 需要 GPU 与本地权重。
+- PF-3 使用 eager attention，显存压力较高。
+- `data.max_samples` 建议先用小样本 smoke，再扩大。
+- 新增模型时优先增加 adapter；新增审计方法时增加 metric module 与 registry entry。
+- 新增数据集优先通过 `data.field_map` 配字段，不改 metric 代码。
