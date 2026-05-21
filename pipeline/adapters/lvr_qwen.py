@@ -24,6 +24,10 @@ class LVRQwenAdapter(QwenVLAdapter):
     def __init__(self, arch: str = "lvr_qwen2_5_vl"):
         super().__init__("qwen2_5_vl")
         self.arch = arch
+        self.lvr_start_token = "<|lvr_start|>"
+        self.lvr_token = "<|lvr|>"
+        self.lvr_latent_end_token = "<|lvr_latent_end|>"
+        self.lvr_end_token = "<|lvr_end|>"
 
     def load(self, cfg_model: dict, *, dtype: torch.dtype, device: str) -> ModelBundle:
         from transformers import AutoConfig, AutoProcessor
@@ -63,13 +67,18 @@ class LVRQwenAdapter(QwenVLAdapter):
         return ModelBundle(model=model, processor=processor, image_pad_id=image_pad_id)
 
     def _ensure_lvr_ids(self, model, processor, cfg_model: dict):
+        self.lvr_start_token = cfg_model.get("lvr_start_token", "<|lvr_start|>")
+        self.lvr_token = cfg_model.get("lvr_token", "<|lvr|>")
+        self.lvr_latent_end_token = cfg_model.get(
+            "lvr_latent_end_token", "<|lvr_latent_end|>"
+        )
+        self.lvr_end_token = cfg_model.get("lvr_end_token", "<|lvr_end|>")
+
         token_names = {
-            "lvr_start_id": cfg_model.get("lvr_start_token", "<|lvr_start|>"),
-            "lvr_id": cfg_model.get("lvr_token", "<|lvr|>"),
-            "lvr_latent_end_id": cfg_model.get(
-                "lvr_latent_end_token", "<|lvr_latent_end|>"
-            ),
-            "lvr_end_id": cfg_model.get("lvr_end_token", "<|lvr_end|>"),
+            "lvr_start_id": self.lvr_start_token,
+            "lvr_id": self.lvr_token,
+            "lvr_latent_end_id": self.lvr_latent_end_token,
+            "lvr_end_id": self.lvr_end_token,
         }
 
         for attr, tok in token_names.items():
@@ -88,10 +97,45 @@ class LVRQwenAdapter(QwenVLAdapter):
         )
 
     def _make_lvr_sequence(self, wrapper, sample, cfg: dict | None = None) -> str:
+        """
+        Match official proj/lvr/src/dataset/data_utils.py::replace_lvr_tokens.
+
+        Implemented mode:
+          fixed_num_of_lvr_tokens is not None
+            => <|lvr_start|> + N * <|lvr|> + <|lvr_end|>
+
+        Important:
+          Official fixed-token mode does NOT insert <|lvr_latent_end|>.
+          <|lvr_latent_end|> only appears in the official dynamic token-index
+          branch when fixed_num_of_lvr_tokens is None and latent_end_token is set.
+
+        This repo currently supports the fixed teacher-forced audit path only.
+        """
         cfg = cfg or getattr(wrapper, "cfg", {}) or {}
         audit_cfg = cfg.get("audit", {}) if isinstance(cfg, dict) else {}
+
+        expansion_mode = str(audit_cfg.get("lvr_expansion_mode", "fixed")).strip().lower()
+        if expansion_mode not in {"fixed", "fixed_num_tokens"}:
+            raise NotImplementedError(
+                "Only official fixed_num_of_lvr_tokens LVR expansion is implemented. "
+                "Dynamic token-index expansion requires lvr_token_idxs_list from the "
+                "official data pipeline and is not yet supported here."
+            )
+
+        include_latent_end = bool(audit_cfg.get("lvr_include_latent_end_token", False))
+        if include_latent_end:
+            raise ValueError(
+                "Invalid LVR config: official replace_lvr_tokens() does not insert "
+                "<|lvr_latent_end|> in fixed_num_of_lvr_tokens mode. Set "
+                "audit.lvr_include_latent_end_token=false, or implement the official "
+                "dynamic token-index branch before enabling latent_end."
+            )
+
         n = int(audit_cfg.get("lvr_num_tokens", 16))
-        return "<|lvr_start|>" + "<|lvr|>" * n + "<|lvr_end|>"
+        if n <= 0:
+            raise ValueError(f"audit.lvr_num_tokens must be positive, got {n}")
+
+        return self.lvr_start_token + self.lvr_token * n + self.lvr_end_token
 
     def _teacher_forced_assistant_text(self, wrapper, sample) -> str:
         assistant = sample.lvr_assistant or ""
@@ -182,8 +226,67 @@ class LVRQwenAdapter(QwenVLAdapter):
                 "lvr_id": int(wrapper.model.config.lvr_id),
                 "lvr_latent_end_id": int(wrapper.model.config.lvr_latent_end_id),
                 "lvr_end_id": int(wrapper.model.config.lvr_end_id),
+                "lvr_expansion_mode": audit_cfg.get("lvr_expansion_mode", "fixed"),
+                "lvr_include_latent_end_token": bool(
+                    audit_cfg.get("lvr_include_latent_end_token", False)
+                ),
+                "lvr_placeholder_span_excludes_latent_end": True,
             },
         )
+
+    def _extract_lvr_positions_from_sequence(
+        self,
+        seq,
+        prompt_len: int,
+        *,
+        lvr_start_id: int,
+        lvr_id: int,
+        lvr_latent_end_id: int | None,
+        lvr_end_id: int,
+    ) -> dict:
+        lvr_token_positions = []
+        lvr_latent_end_positions = []
+        lvr_block_spans = []
+        unexpected_lvr_inner_positions = []
+
+        in_lvr = False
+        current_start = None
+
+        for pos in range(prompt_len, int(seq.shape[0])):
+            tid = int(seq[pos].item())
+
+            if tid == lvr_start_id:
+                in_lvr = True
+                current_start = pos
+                continue
+
+            if tid == lvr_end_id:
+                if in_lvr and current_start is not None:
+                    lvr_block_spans.append([current_start, pos + 1])
+                in_lvr = False
+                current_start = None
+                continue
+
+            if not in_lvr:
+                continue
+
+            if lvr_latent_end_id is not None and tid == lvr_latent_end_id:
+                lvr_latent_end_positions.append(pos)
+            elif tid == lvr_id:
+                lvr_token_positions.append(pos)
+            else:
+                unexpected_lvr_inner_positions.append({
+                    "position": pos,
+                    "token_id": tid,
+                })
+
+        return {
+            "lvr_generated_positions": lvr_token_positions,
+            "lvr_token_positions": lvr_token_positions,
+            "lvr_latent_end_positions": lvr_latent_end_positions,
+            "lvr_block_spans": lvr_block_spans,
+            "unexpected_lvr_inner_positions": unexpected_lvr_inner_positions,
+        }
 
     @torch.no_grad()
     def generate_with_trace(
@@ -235,17 +338,19 @@ class LVRQwenAdapter(QwenVLAdapter):
         )[0]
 
         lvr_start_id = int(wrapper.model.config.lvr_start_id)
+        lvr_id = int(wrapper.model.config.lvr_id)
+        lvr_latent_end_id = getattr(wrapper.model.config, "lvr_latent_end_id", None)
+        if lvr_latent_end_id is not None:
+            lvr_latent_end_id = int(lvr_latent_end_id)
         lvr_end_id = int(wrapper.model.config.lvr_end_id)
-        lvr_generated_positions = []
-        in_lvr = False
-        for pos in range(prompt_len, int(seq.shape[0])):
-            tid = int(seq[pos].item())
-            if tid == lvr_start_id:
-                in_lvr = True
-            elif tid == lvr_end_id:
-                in_lvr = False
-            elif in_lvr:
-                lvr_generated_positions.append(pos)
+        lvr_pos_info = self._extract_lvr_positions_from_sequence(
+            seq,
+            prompt_len,
+            lvr_start_id=lvr_start_id,
+            lvr_id=lvr_id,
+            lvr_latent_end_id=lvr_latent_end_id,
+            lvr_end_id=lvr_end_id,
+        )
 
         return {
             "inputs": inputs,
@@ -254,7 +359,7 @@ class LVRQwenAdapter(QwenVLAdapter):
             "generated_text": text_out,
             "attentions": getattr(gen, "attentions", None),
             "hidden_states": getattr(gen, "hidden_states", None),
-            "lvr_generated_positions": lvr_generated_positions,
+            **lvr_pos_info,
             "trace_quality": "approx_from_generated_token_ids",
             "notes": {
                 "decoding_strategy": decoding_strategy,

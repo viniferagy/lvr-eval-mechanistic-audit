@@ -233,12 +233,68 @@ def test_lvr_assistant_expansion():
     wrapper = SimpleNamespace(cfg={"audit": {"lvr_num_tokens": 3}})
     adapter = LVRQwenAdapter()
     text = adapter._teacher_forced_assistant_text(wrapper, sample)
+    expected = "<|lvr_start|><|lvr|><|lvr|><|lvr|><|lvr_end|>\n<answer>B</answer>"
     assert "<lvr>" not in text
+    assert text == expected
     assert text.count("<|lvr|>") == 3
     assert text.startswith("<|lvr_start|>")
     assert "<|lvr_end|>" in text
+    assert "<|lvr_latent_end|>" not in text
     assert "<answer>B</answer>" in text
-    print("  <lvr> -> special token sequence ok")
+
+    bad_wrapper = SimpleNamespace(
+        cfg={
+            "audit": {
+                "lvr_expansion_mode": "fixed",
+                "lvr_num_tokens": 3,
+                "lvr_include_latent_end_token": True,
+            }
+        }
+    )
+    try:
+        adapter._teacher_forced_assistant_text(bad_wrapper, sample)
+        raise AssertionError("fixed LVR expansion must reject latent_end insertion")
+    except ValueError as exc:
+        assert "does not insert <|lvr_latent_end|>" in str(exc)
+
+    print("  <lvr> -> official fixed special token sequence ok")
+
+
+def test_lvr_trace_position_extraction():
+    print("\n== 7. LVR generation trace position extraction ==")
+    try:
+        import torch
+    except ImportError:
+        print("  torch unavailable; skip LVR trace extraction check")
+        return
+
+    adapter = LVRQwenAdapter()
+    lvr_start_id, lvr_id, lvr_latent_end_id, lvr_end_id = 201, 202, 203, 204
+    seq = torch.tensor([
+        10, 11,
+        lvr_start_id,
+        lvr_id,
+        lvr_id,
+        lvr_latent_end_id,
+        lvr_end_id,
+        99,
+    ])
+
+    info = adapter._extract_lvr_positions_from_sequence(
+        seq,
+        prompt_len=2,
+        lvr_start_id=lvr_start_id,
+        lvr_id=lvr_id,
+        lvr_latent_end_id=lvr_latent_end_id,
+        lvr_end_id=lvr_end_id,
+    )
+
+    assert info["lvr_token_positions"] == [3, 4]
+    assert info["lvr_generated_positions"] == [3, 4]
+    assert info["lvr_latent_end_positions"] == [5]
+    assert info["lvr_block_spans"] == [[2, 7]]
+    assert info["unexpected_lvr_inner_positions"] == []
+    print("  latent_end marker excluded from <|lvr|> positions -> ok")
 
 
 def fake_bf1(tag, n_layers=28, strength=1.0):
@@ -278,7 +334,7 @@ def fake_cf2(tag, robust=1.0):
 
 
 def test_end_to_end():
-    print("\n== 7. sanity + 端到端 analysis(合成数据) ==")
+    print("\n== 8. sanity + 端到端 analysis(合成数据) ==")
     ablation = {
         "qwen2_5_vl_7b": fake_bf1("qwen2_5_vl_7b", strength=1.4),
         "lvr_7b": fake_bf1("lvr_7b", strength=0.7),
@@ -322,6 +378,7 @@ def main():
     test_data_field_mapping()
     test_lvr_json_loader()
     test_lvr_assistant_expansion()
+    test_lvr_trace_position_extraction()
     test_end_to_end()
     print("\nSMOKE TEST PASSED ✅")
 

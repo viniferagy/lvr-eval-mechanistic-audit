@@ -166,7 +166,9 @@ models:
 audit:
   mode: "teacher_forced"
   query_target: "auto"
+  lvr_expansion_mode: "fixed"
   lvr_num_tokens: 16
+  lvr_include_latent_end_token: false
   allow_lvr_fallback_to_answer_probe: false
   lvr_decoding_strategy: "steps"
   lvr_steps: 16
@@ -197,7 +199,20 @@ data:
 <|lvr_start|><|lvr|>...<|lvr|><|lvr_end|>
 ```
 
-`audit.lvr_num_tokens` 控制 `<|lvr|>` 的数量。`allow_lvr_fallback_to_answer_probe=false` 时，如果 LVR teacher-forced 输入中没有产生 `<|lvr|>` span，run 会 fail，而不是悄悄退回 answer-probe control。
+LVR token expansion follows the official `proj/lvr/src/dataset/data_utils.py::replace_lvr_tokens()` semantics.
+
+In the currently implemented teacher-forced fixed-token mode:
+
+```text
+<lvr>
+  -> <|lvr_start|> + N x <|lvr|> + <|lvr_end|>
+```
+
+where `N = audit.lvr_num_tokens`.
+
+Important: this fixed-token branch does **not** insert `<|lvr_latent_end|>`. The official code only inserts `<|lvr_latent_end|>` in the dynamic token-index branch, when `fixed_num_of_lvr_tokens is None` and `latent_end_token` is enabled. This repo currently does not implement that dynamic `lvr_token_idxs_list` branch.
+
+`lvr_latent_end_token` is still configured and its token id is still resolved, because the official model defines it and generation-time traces may encounter it. `allow_lvr_fallback_to_answer_probe=false` 时，如果 LVR teacher-forced 输入中没有产生 `<|lvr|>` span，run 会 fail，而不是悄悄退回 answer-probe control。
 
 metric 开关：
 

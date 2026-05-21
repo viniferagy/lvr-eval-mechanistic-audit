@@ -32,7 +32,13 @@ models:
 audit:
   mode: "teacher_forced"       # teacher_forced | generation_trace
   query_target: "auto"         # auto | lvr_placeholder_tokens | answer_probe_pos
+
+  # Official fixed_num_of_lvr_tokens branch:
+  # <|lvr_start|> + N * <|lvr|> + <|lvr_end|>
+  # It does NOT include <|lvr_latent_end|>.
+  lvr_expansion_mode: "fixed"
   lvr_num_tokens: 16            # teacher_forced 时把官方 <lvr> 展开成多少个 <|lvr|>
+  lvr_include_latent_end_token: false
   allow_lvr_fallback_to_answer_probe: false
   lvr_decoding_strategy: "steps"
   lvr_steps: 16
