@@ -1,0 +1,110 @@
+# =============================================================================
+#  LVR-Eval :: 中央配置  (BF-1 Latent Ablation + CF-2 PF Decay Curve)
+#  指标 registry 入口见 pipeline/metrics/
+#  internal_metrics.py 暂保留为 BF-3 / PF-3 底层兼容 facade
+#  (移植自 bf3_today.py / pf3_today.py)
+# =============================================================================
+
+models:
+  qwen2_5_vl_7b:
+    name: "Qwen2.5-VL-7B"
+    path: "./models/Qwen/Qwen2___5-VL-7B-Instruct"   # 改成你的本地路径
+    arch: "qwen2_5_vl"
+    layer_path: null
+    image_pad_token: "<|image_pad|>"     # latent span 定位用; LVR 若同源则不变
+  qwen2_5_vl_3b:
+    name: "Qwen2.5-VL-3B"
+    path: "./models/Qwen/Qwen2___5-VL-3B-Instruct"
+    arch: "qwen2_5_vl"
+    layer_path: null
+    image_pad_token: "<|image_pad|>"
+  lvr_7b:
+    name: "LVR-7B"
+    path: "./models/LVR-7B"               # 改成你的路径
+    arch: "qwen2_5_vl"                          # 若 LVR 基于 Qwen2.5-VL, 可改 qwen2_5_vl
+    layer_path: null
+    image_pad_token: "<|image_pad|>"
+
+# 旧实验脚本中的短 tag 会自动映射到上面的可读模型名。
+model_aliases:
+  M0: qwen2_5_vl_7b
+  M0_small: qwen2_5_vl_3b
+  M2: lvr_7b
+
+# -------- Probe 数据集 (复用 BF-3/PF-3 的 audit 集; PF-3 不能用 synthetic) ----
+data:
+  source_type: "hf"          # "jsonl" | "hf"
+  jsonl_path: "./data/audit_set.jsonl"   # 每行 {"image","question","answer"?,"id"?}
+  image_root: "./data/images"
+  hf_name: "lmms-lab-eval/MMVP"  # source_type=hf 时用
+  hf_split: "train"
+  field_map:                    # 可改成目标数据集的字段名; 支持 ["a", "b"] fallback 和 "meta.id" 点路径
+    image: "image"
+    question: ["question", "query", "prompt"]
+    answer: ["answer", "label", "target"]
+    id: ["id", "sample_id", "uid"]
+  max_samples: 50                # 内部指标 + eager attention 偏重, 默认 30
+  shuffle_seed: 0
+
+inference:
+  dtype: "bfloat16"
+  device: "cuda:0"
+  # 注: 内部指标走单样本 forward(output_hidden_states / output_attentions),
+  #     不走 batch generate, 所以没有 batch_size。
+
+# -------- 指标开关 (新入口; 旧 bf1/cf2.enabled 会继续作为 fallback) ---------
+metrics:
+  bf3_confidence_progression:
+    enabled: true               # 当前作为 BF-1/CF-2 readout 使用
+  pf3_attention_distance:
+    enabled: true               # 当前作为 BF-1/CF-2 readout 使用
+  bf1_latent_ablation:
+    enabled: true
+  cf2_pf_decay_curve:
+    enabled: true
+
+# -------- PF-3 设置 (BF-1 readout 与 CF-2 都会用) ---------------------------
+pf3:
+  corruption_mode: "mask_50pct"  # BF-1 readout 时固定用哪种 corruption
+  num_seeds: 3                   # 随机 corruption 多 seed 取平均
+
+# -------- BF-1 : Latent Ablation -------------------------------------------
+bf1:
+  enabled: true
+  mode: "identity"               # identity(推荐) | zero | mean | noise
+  noise_std: 0.1
+  layers: null                   # null=全部层; 也可 [0,4,8,...] 粗扫
+  readout_bf3: true              # 消融后重算 BF-3 entropy curve
+  readout_pf3: true              # 消融后重算 PF-3 attention KL curve
+  bf3_scalar: "early_to_late_drop"   # Δ 用哪个 BF-3 标量
+  pf3_scalar: "mean_kl"              # Δ 用哪个 PF-3 标量
+
+# -------- CF-2 : PF Decay Curve --------------------------------------------
+cf2:
+  enabled: true
+  readout: "pf3"                 # "pf3"/"bf3" 或完整 metric id
+  families:                      # corruption family -> severity 列表(0 会自动补为干净基线)
+    mask:          [0.2, 0.4, 0.6, 0.8]      # mask ratio
+    gaussian_blur: [2, 5, 10, 15, 20]        # blur radius
+
+validation:
+  run_sanity: true                # 跑完 BF-1/CF-2 后写 sanity/*.json
+  fail_fast: false                # true 时 sanity fail 会让 run_all 以非 0 退出
+  bf3:
+    min_layers: 20
+    min_drop: 0.5
+    max_drop: 10.0
+    warn_monotonicity: 0.3
+    pass_monotonicity: 0.5
+  pf3:
+    min_layers: 20
+    near_zero_kl: 1.0e-6
+    max_sample_cv: 0.5
+  bf1:
+    min_abs_delta: 1.0e-8
+  cf2:
+    warn_trend_spearman: 0.2
+
+output:
+  root: "./runs"
+  run_name: null

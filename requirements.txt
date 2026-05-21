@@ -1,0 +1,15 @@
+# 核心
+torch>=2.1
+transformers>=4.51,<4.56  # 避开新版 FP8 custom_op 与旧 torch 的导入兼容问题
+accelerate>=0.30
+qwen-vl-utils             # Qwen-VL 视觉预处理(可选, 若用其 process_vision_info)
+pillow
+numpy
+pyyaml
+matplotlib
+
+# 可选
+datasets>=2.19            # source_type=hf 时需要
+pyarrow<21                # 兼容旧 datasets 中的 PyExtensionType 引用
+scipy                     # rank_correlation (spearman) 需要; 缺失会自动跳过
+tqdm                      # 可选: 进度条(原始脚本用)

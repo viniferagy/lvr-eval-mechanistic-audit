@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Large model/data artifacts
+models/*
+!models/.gitkeep
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+*.gguf
+
+# Run outputs
+runs/*
+!runs/.gitkeep
+
+# Local/editor/system files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Logs and temporary files
+*.log
+*.tmp
+tmp/
+

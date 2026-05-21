@@ -1,0 +1,193 @@
+#!/usr/bin/env python
+"""
+smoke_test.py
+=============
+不加载真实模型/不需要 GPU/torch, 验证非模型逻辑接线:
+  - corruption 算子 (mask / blur / shuffle / 连续 severity)
+  - curve 特征拟合 (AUC / char_severity, 升降型都覆盖)
+  - BF-3 / PF-3 / BF-1 / CF-2 sanity report
+  - BF-1 / CF-2 结果结构 -> analysis 出图 + radar + summary + spearman
+
+真实 BF-3/PF-3 forward 逻辑需要 GPU+权重, 这里用合成 curve 注入。
+
+  python smoke_test.py
+"""
+from __future__ import annotations
+
+import os
+import json
+import tempfile
+
+import numpy as np
+from PIL import Image
+
+from pipeline.data import load_probe_set
+from pipeline.internal_metrics import corrupt_image
+from pipeline.metrics import list_metrics, resolve_readout
+from pipeline.results import make_metric_result
+from pipeline.degradation import curve_features
+from pipeline.analysis import run_analysis
+from pipeline.sanity import has_failed_checks, run_sanity_suite, save_sanity_reports
+
+
+def make_img(seed=0):
+    rng = np.random.default_rng(seed)
+    arr = (rng.random((64, 64, 3)) * 255).astype("uint8")
+    return Image.fromarray(arr)
+
+
+def test_corruption():
+    print("== 1. corruption 算子 ==")
+    img = make_img()
+    for mode in ["mask_50pct", "mask_80pct", "gaussian_blur", "patch_shuffle"]:
+        out = corrupt_image(img, mode, seed=0)
+        assert out.size == img.size, mode
+        print(f"  {mode:14s} -> ok")
+    # 连续 severity
+    assert corrupt_image(img, "mask", seed=0, severity=0.3).size == img.size
+    assert corrupt_image(img, "gaussian_blur", severity=15).size == img.size
+    print("  连续 severity (mask=0.3, blur=15) -> ok")
+
+
+def test_reductions():
+    print("\n== 2. curve 归约 + 特征 ==")
+    metric_ids = {m.metric_id for m in list_metrics()}
+    assert "bf3_confidence_progression" in metric_ids
+    assert "pf3_attention_distance" in metric_ids
+    bf3_reduce = resolve_readout("bf3").require_reduce()
+    pf3_reduce = resolve_readout("pf3").require_reduce()
+    bf3 = np.linspace(6.0, 1.0, 28)            # entropy 早高末低
+    r = bf3_reduce(bf3)
+    print(f"  bf3_reduce: {r}")
+    assert r["early_to_late_drop"] > 0
+    pf3 = np.concatenate([np.linspace(0.1, 0.5, 14), np.linspace(0.5, 0.2, 14)])
+    rp = pf3_reduce(pf3)
+    print(f"  pf3_reduce: {rp}")
+    assert rp["peak_kl"] >= rp["mean_kl"]
+    # 升型曲线(PF-3 decay): severity↑ KL↑
+    up = curve_features([0, 0.2, 0.4, 0.6, 0.8], [0.1, 0.2, 0.35, 0.5, 0.6])
+    print(f"  curve_features(up):   {up}")
+    assert up["rel_change"] > 0 and up["char_severity"] is not None
+    # 降型曲线
+    down = curve_features([0, 1, 2, 3, 4], [1.0, 0.8, 0.6, 0.4, 0.2])
+    print(f"  curve_features(down): {down}")
+    assert down["rel_change"] < 0
+
+
+def test_data_field_mapping():
+    print("\n== 3. data field mapping ==")
+    out_dir = tempfile.mkdtemp(prefix="lvr_data_")
+    img_path = os.path.join(out_dir, "sample.png")
+    make_img(seed=7).save(img_path)
+    jsonl_path = os.path.join(out_dir, "data.jsonl")
+    row = {
+        "meta": {"uid": "sample-7"},
+        "img_path": "sample.png",
+        "prompt_text": "What is shown?",
+        "target_text": "noise image",
+    }
+    with open(jsonl_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(row) + "\n")
+    samples = load_probe_set({
+        "source_type": "jsonl",
+        "jsonl_path": jsonl_path,
+        "image_root": out_dir,
+        "field_map": {
+            "id": "meta.uid",
+            "image": "img_path",
+            "question": "prompt_text",
+            "answer": "target_text",
+        },
+    })
+    assert len(samples) == 1
+    assert samples[0].id == "sample-7"
+    assert samples[0].question == "What is shown?"
+    assert samples[0].answer == "noise image"
+    assert samples[0].image.size == (64, 64)
+    print("  jsonl custom field_map -> ok")
+
+
+def fake_bf1(tag, n_layers=28, strength=1.0):
+    rng = np.random.default_rng(hash(tag) % 2**31)
+    base_bf3 = np.linspace(6, 1, n_layers)
+    base_pf3 = np.concatenate([np.linspace(0.1, 0.5, n_layers // 2),
+                               np.linspace(0.5, 0.2, n_layers - n_layers // 2)])
+    layers = []
+    for li in range(n_layers):
+        crit = np.exp(-((li - n_layers / 2) ** 2) / 8) * strength
+        layers.append({
+            "layer": li,
+            "bf3": {"early_to_late_drop": 5 - 2 * crit},
+            "pf3": {"mean_kl": 0.35 - 0.2 * crit},
+            "bf3_curve": (base_bf3 + rng.normal(0, 0.05, n_layers)).tolist(),
+            "pf3_curve": (base_pf3 + rng.normal(0, 0.01, n_layers)).tolist(),
+            "delta": {"bf3": 2 * crit, "pf3": 0.2 * crit},
+        })
+    return {"model": tag, "mode": "identity", "n_layers": n_layers,
+            "bf3_scalar": "early_to_late_drop", "pf3_scalar": "mean_kl",
+            "baseline": {"bf3": {"early_to_late_drop": 5.0},
+                         "pf3": {"mean_kl": 0.35},
+                         "bf3_curve": base_bf3.tolist(),
+                         "pf3_curve": base_pf3.tolist()},
+            "layers": layers}
+
+
+def fake_cf2(tag, robust=1.0):
+    fams = {}
+    for fam, sev in [("mask", [0.2, 0.4, 0.6, 0.8]),
+                     ("gaussian_blur", [2, 5, 10, 15, 20])]:
+        severities = [0.0] + sev
+        curve = [0.1 + robust * 0.5 * (s / max(severities)) for s in severities]
+        fams[fam] = {"severities": severities, "curve": curve,
+                     "features": curve_features(severities, curve)}
+    return {"model": tag, "readout": "pf3", "families": fams}
+
+
+def test_end_to_end():
+    print("\n== 4. sanity + 端到端 analysis(合成数据) ==")
+    ablation = {
+        "qwen2_5_vl_7b": fake_bf1("qwen2_5_vl_7b", strength=1.4),
+        "lvr_7b": fake_bf1("lvr_7b", strength=0.7),
+    }
+    decay = {
+        "qwen2_5_vl_7b": fake_cf2("qwen2_5_vl_7b", robust=1.3),
+        "lvr_7b": fake_cf2("lvr_7b", robust=0.8),
+    }
+    metric_results = [
+        make_metric_result("bf1_latent_ablation", tag, result)
+        for tag, result in ablation.items()
+    ] + [
+        make_metric_result("cf2_pf_decay_curve", tag, result)
+        for tag, result in decay.items()
+    ]
+    out_dir = tempfile.mkdtemp(prefix="lvr_smoke_")
+    sanity_reports = run_sanity_suite(ablation, decay, cfg={})
+    sanity_dir = save_sanity_reports(sanity_reports, out_dir)
+    assert sanity_reports, "sanity reports should not be empty"
+    assert not has_failed_checks(sanity_reports), "fake sanity reports should pass"
+    assert "summary_sanity.json" in sorted(os.listdir(sanity_dir))
+
+    run_analysis(ablation, decay, out_dir, metric_results=metric_results)
+    produced = sorted(os.listdir(out_dir))
+    print(f"  产出 ({out_dir}):")
+    for p in produced:
+        print("   ", p)
+    for need in ["bf1_layerwise_bf3.png", "bf1_layerwise_pf3.png",
+                 "bf1_baseline_bf3_curve.png", "bf1_baseline_pf3_curve.png",
+                 "cf2_decay_mask.png", "cf2_decay_gaussian_blur.png",
+                 "radar_4metric.png", "summary.json", "rank_correlation.json",
+                 "metric_results_summary.json", "metric_plots"]:
+        assert need in produced, f"缺少 {need}"
+    assert os.listdir(os.path.join(out_dir, "metric_plots"))
+
+
+def main():
+    test_corruption()
+    test_reductions()
+    test_data_field_mapping()
+    test_end_to_end()
+    print("\nSMOKE TEST PASSED ✅")
+
+
+if __name__ == "__main__":
+    main()
