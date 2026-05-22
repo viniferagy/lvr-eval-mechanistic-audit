@@ -46,6 +46,7 @@ def _record_span_success(stats: dict, meta: dict):
             "query_target_kind": kind,
             "query_span": meta.get("query_span"),
             "image_span": meta.get("image_span"),
+            "image_preprocess": meta.get("image_preprocess"),
             "adapter_notes": meta.get("adapter_notes", {}),
         })
 
@@ -133,11 +134,13 @@ def _metric_at_severity(wrapper, samples: list[ProbeSample], mode: str,
         vals = []
         for s in samples:
             span_stats["n_total"] += 1
-            img = (s.image if severity == 0
-                   else IM.corrupt_image(s.image, mode, seed=0, severity=severity))
+            processed, image_meta = IM.prepare_image_for_audit(wrapper, s.image)
+            img = (processed if severity == 0
+                   else IM.corrupt_image(processed, mode, seed=0, severity=severity))
             s_corr = replace(s, image=img)
             try:
                 meta = IM.bf3_curve_with_meta_from_sample(wrapper, s_corr)
+                meta["image_preprocess"] = image_meta
                 vals.append(bf3_reduce(meta["curve"])["final_entropy"])
                 _record_span_success(span_stats, meta)
             except Exception as e:  # noqa: BLE001

@@ -85,6 +85,36 @@ def _build_inputs(wrapper, image=None, question: str | None = None, sample=None)
     return wrapper.build_inputs(image, question)
 
 
+def prepare_image_for_audit(wrapper, image):
+    """Adapter-aware image preprocessing plus metadata."""
+    adapter = getattr(wrapper, "adapter", None)
+    if adapter is not None and hasattr(adapter, "prepare_image_for_audit"):
+        return adapter.prepare_image_for_audit(wrapper, image)
+    if isinstance(image, Image.Image):
+        img = image.convert("RGB")
+        w, h = img.size
+        return img, {
+            "image_original_size": [int(w), int(h)],
+            "image_processed_size": [int(w), int(h)],
+            "image_resize_applied": False,
+            "max_image_side": None,
+            "max_image_pixels": None,
+        }
+    return image, {
+        "image_original_size": None,
+        "image_processed_size": None,
+        "image_resize_applied": False,
+        "max_image_side": None,
+        "max_image_pixels": None,
+    }
+
+
+def _with_image_preprocess(payload: dict, image_meta: dict | None) -> dict:
+    if image_meta is not None:
+        payload["image_preprocess"] = image_meta
+    return payload
+
+
 # --------------------------------------------------------------------------- #
 #  BF-3 : logit-lens entropy
 # --------------------------------------------------------------------------- #
@@ -131,12 +161,21 @@ def bf3_curve_from_inputs_low_memory(wrapper, inputs, query_span) -> np.ndarray:
         handles.append(layer.register_forward_hook(make_hook(idx)))
 
     try:
-        wrapper.model(
-            **inputs,
-            output_hidden_states=False,
-            output_attentions=False,
-            return_dict=True,
-        )
+        try:
+            wrapper.model(
+                **inputs,
+                output_hidden_states=False,
+                output_attentions=False,
+                return_dict=True,
+                use_cache=False,
+            )
+        except TypeError:
+            wrapper.model(
+                **inputs,
+                output_hidden_states=False,
+                output_attentions=False,
+                return_dict=True,
+            )
     finally:
         for handle in handles:
             handle.remove()
@@ -171,23 +210,26 @@ def bf3_curve_from_inputs(wrapper, inputs, query_span=None, outputs=None) -> np.
 @_no_grad()
 def bf3_curve_with_meta(wrapper, image: Image.Image, question: str) -> dict:
     """Single-sample BF-3 curve plus span metadata."""
+    image, image_meta = prepare_image_for_audit(wrapper, image)
     inputs = _build_inputs(wrapper, image=image, question=question)
     spans, query_span = _query_span_from_adapter(wrapper, inputs)
-    return {
+    return _with_image_preprocess({
         "curve": bf3_curve_from_inputs(wrapper, inputs, query_span),
         **_span_payload(spans, query_span),
-    }
+    }, image_meta)
 
 
 @_no_grad()
 def bf3_curve_with_meta_from_sample(wrapper, sample) -> dict:
     """Single-sample BF-3 using full ProbeSample metadata."""
+    image, image_meta = prepare_image_for_audit(wrapper, sample.image)
+    sample = replace(sample, image=image)
     inputs = _build_inputs(wrapper, sample=sample)
     spans, query_span = _query_span_from_adapter(wrapper, inputs)
-    return {
+    return _with_image_preprocess({
         "curve": bf3_curve_from_inputs(wrapper, inputs, query_span),
         **_span_payload(spans, query_span),
-    }
+    }, image_meta)
 
 
 @_no_grad()
@@ -354,6 +396,7 @@ def pf3_curve_with_meta(wrapper, image: Image.Image, question: str,
     token 数不一致的 corrupted seed 会被跳过 (Qwen 动态分辨率)。
     severity 仅 CF-2 用 (连续 corruption 强度)。
     """
+    image, image_meta = prepare_image_for_audit(wrapper, image)
     intact = _forward_attn(wrapper, image, question)
     intact_T = intact["seq_len"]
     intact_attns = intact["query_image_attn"]
@@ -382,7 +425,7 @@ def pf3_curve_with_meta(wrapper, image: Image.Image, question: str,
         per_seed.append(per_layer)
 
     curve = np.asarray(per_seed).mean(axis=0) if per_seed else None
-    return {
+    return _with_image_preprocess({
         "curve": curve,
         "seq_len": intact_T,
         "n_total": int(num_seeds),
@@ -390,7 +433,7 @@ def pf3_curve_with_meta(wrapper, image: Image.Image, question: str,
         "n_skipped": int(num_seeds - len(per_seed)),
         "skip_reasons": skip_reasons,
         **_span_payload(spans, query_span),
-    }
+    }, image_meta)
 
 
 @_no_grad()
@@ -402,6 +445,8 @@ def pf3_curve_with_meta_from_sample(wrapper, sample,
     Sample-level PF-3 path. Required for LVR teacher-forced inputs because the
     assistant-side <lvr> metadata lives on ProbeSample.
     """
+    image, image_meta = prepare_image_for_audit(wrapper, sample.image)
+    sample = replace(sample, image=image)
     intact = _forward_attn_from_sample(wrapper, sample)
     intact_T = intact["seq_len"]
     intact_attns = intact["query_image_attn"]
@@ -413,7 +458,7 @@ def pf3_curve_with_meta_from_sample(wrapper, sample,
     per_seed = []
     skip_reasons: dict[str, int] = {}
     for seed in range(num_seeds):
-        corr_img = corrupt_image(sample.image, corruption_mode, seed=seed, severity=severity)
+        corr_img = corrupt_image(image, corruption_mode, seed=seed, severity=severity)
         corr_sample = replace(sample, image=corr_img)
         corr = _forward_attn_from_sample(wrapper, corr_sample)
         if corr["seq_len"] != intact_T:
@@ -430,7 +475,7 @@ def pf3_curve_with_meta_from_sample(wrapper, sample,
         per_seed.append(per_layer)
 
     curve = np.asarray(per_seed).mean(axis=0) if per_seed else None
-    return {
+    return _with_image_preprocess({
         "curve": curve,
         "seq_len": intact_T,
         "n_total": int(num_seeds),
@@ -438,7 +483,7 @@ def pf3_curve_with_meta_from_sample(wrapper, sample,
         "n_skipped": int(num_seeds - len(per_seed)),
         "skip_reasons": skip_reasons,
         **_span_payload(spans, query_span),
-    }
+    }, image_meta)
 
 
 @_no_grad()

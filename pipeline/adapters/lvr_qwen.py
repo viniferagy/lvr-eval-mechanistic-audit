@@ -178,7 +178,13 @@ class LVRQwenAdapter(QwenVLAdapter):
         cfg = getattr(wrapper, "cfg", {}) or {}
         audit_cfg = cfg.get("audit", {}) if isinstance(cfg, dict) else {}
         assistant = sample.lvr_assistant or ""
-        if "<lvr>" in assistant:
+        num_lvr = assistant.count("<lvr>")
+        if num_lvr > 1 and not bool(audit_cfg.get("allow_multiple_lvr_placeholders", False)):
+            raise ValueError(
+                f"LVR teacher_forced audit currently supports exactly one <lvr> block, got {num_lvr}. "
+                "Multiple blocks require disjoint span support."
+            )
+        if num_lvr > 0:
             return assistant.replace("<lvr>", self._make_lvr_sequence(wrapper, sample))
 
         if not bool(audit_cfg.get("allow_synthetic_lvr_assistant", False)):
@@ -275,6 +281,14 @@ class LVRQwenAdapter(QwenVLAdapter):
                 "lvr_expansion_mode": audit_cfg.get("lvr_expansion_mode", "fixed"),
                 "lvr_include_latent_end_token": bool(
                     audit_cfg.get("lvr_include_latent_end_token", False)
+                ),
+                "allow_multiple_lvr_placeholders": bool(
+                    audit_cfg.get("allow_multiple_lvr_placeholders", False)
+                ),
+                "span_semantics": (
+                    "continuous_span_may_include_interleaving_text"
+                    if bool(audit_cfg.get("allow_multiple_lvr_placeholders", False))
+                    else "single_contiguous_lvr_placeholder_block"
                 ),
                 "lvr_placeholder_span_excludes_latent_end": True,
             },

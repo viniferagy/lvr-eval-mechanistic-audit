@@ -213,7 +213,7 @@ def _first_image_path(value):
 def _load_lvr_json(cfg: dict) -> list[ProbeSample]:
     path = cfg["json_path"]
     image_root = cfg.get("image_root", "")
-    max_records = cfg.get("max_records_before_sampling")
+    scan_limit = cfg.get("max_scan_records", cfg.get("max_records_before_sampling"))
     require_lvr_placeholder = bool(cfg.get("require_lvr_placeholder", True))
 
     with open(path, "r", encoding="utf-8") as f:
@@ -223,9 +223,11 @@ def _load_lvr_json(cfg: dict) -> list[ProbeSample]:
         raise ValueError(f"LVR JSON must be a list, got {type(records)}: {path}")
 
     out: list[ProbeSample] = []
+    scanned = 0
     for i, r in enumerate(records):
-        if max_records and i >= int(max_records):
+        if scan_limit and i >= int(scan_limit):
             break
+        scanned += 1
         if not isinstance(r, dict):
             logger.debug("skip LVR record %s: expected dict, got %s", i, type(r))
             continue
@@ -283,7 +285,13 @@ def _load_lvr_json(cfg: dict) -> list[ProbeSample]:
             source_dataset=r.get("dataset"),
         ))
 
-    logger.info("loaded LVR JSON: %s -> %d usable samples", path, len(out))
+    logger.info(
+        "loaded LVR JSON: %s -> %d usable samples scanned=%d total_records=%d",
+        path,
+        len(out),
+        scanned,
+        len(records),
+    )
     return out
 
 

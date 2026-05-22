@@ -110,6 +110,7 @@ def probe_internal(wrapper, samples: list[ProbeSample], cfg: dict) -> dict:
             "query_target_kind": kind,
             "query_span": meta.get("query_span"),
             "image_span": meta.get("image_span"),
+            "image_preprocess": meta.get("image_preprocess"),
             "adapter_notes": meta.get("adapter_notes", {}),
         })
 
@@ -217,7 +218,7 @@ def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
     layer_ids = bf1.get("layers") or list(range(wrapper.n_layers))
 
     prepared = []
-    baseline_pf3_curves = []
+    baseline_pf3_by_id: dict[str, dict] = {}
     skip_reasons: dict[str, int] = {}
     query_target_counts: dict[str, int] = {}
     for s in samples:
@@ -227,16 +228,18 @@ def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
             query_span = spans.preferred_query_span()
             curve = IM.bf3_curve_from_inputs(wrapper, inputs, query_span)
             meta = IM._span_payload(spans, query_span)  # internal JSON-safe helper
+            processed, image_meta = IM.prepare_image_for_audit(wrapper, s.image)
+            meta["image_preprocess"] = image_meta
             prepared.append({
                 "id": s.id,
                 "sample": s,
-                "inputs": inputs,
                 "query_span": query_span,
                 "baseline_curve": curve,
                 "span_meta": meta,
             })
             kind = meta.get("query_target_kind", "unknown")
             query_target_counts[kind] = query_target_counts.get(kind, 0) + 1
+            del inputs
         except Exception as exc:  # noqa: BLE001
             reason = type(exc).__name__
             skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
@@ -252,7 +255,11 @@ def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
                     num_seeds=pf3_seeds,
                 )
                 if pf3_meta["curve"] is not None:
-                    baseline_pf3_curves.append(pf3_meta["curve"])
+                    curve_arr = np.asarray(pf3_meta["curve"], dtype=float)
+                    baseline_pf3_by_id[s.id] = {
+                        "curve": curve_arr,
+                        "scalar": IM.pf3_reduce(curve_arr)[pf3_key],
+                    }
             except Exception as exc:  # noqa: BLE001
                 logger.debug("targeted bf1 baseline pf3 fail: %s", exc)
 
@@ -274,10 +281,17 @@ def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
                 "examples": [rec["span_meta"] for rec in prepared[:5]],
             },
         }
-        if baseline_pf3_curves:
-            baseline_pf3_curve = np.mean(np.stack(baseline_pf3_curves), axis=0)
+        if baseline_pf3_by_id:
+            baseline_pf3_curve = np.mean(
+                np.stack([rec["curve"] for rec in baseline_pf3_by_id.values()]),
+                axis=0,
+            )
             baseline["pf3_curve"] = baseline_pf3_curve.tolist()
             baseline["pf3"] = IM.pf3_reduce(baseline_pf3_curve)
+            baseline["pf3_pairing"] = {
+                "n_baseline": len(baseline_pf3_by_id),
+                "sample_ids_preview": list(baseline_pf3_by_id)[:10],
+            }
     else:
         baseline = {
             "span_metadata": {
@@ -295,33 +309,42 @@ def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
     for li in layer_ids:
         bf3_curves = []
         pf3_curves = []
+        layer_pf3_by_id: dict[str, dict] = {}
         for rec in prepared:
             try:
+                inputs = wrapper.build_inputs_from_sample(rec["sample"])
+                spans = wrapper.adapter.get_spans(wrapper, inputs)
+                query_span = spans.preferred_query_span()
                 with ablate_layer(
                     wrapper,
                     li,
                     mode,
                     noise_std,
-                    token_span=rec["query_span"],
+                    token_span=query_span,
                 ):
                     bf3_curves.append(
                         IM.bf3_curve_from_inputs(
                             wrapper,
-                            rec["inputs"],
-                            rec["query_span"],
+                            inputs,
+                            query_span,
                         )
                     )
+                del inputs
             except Exception as exc:  # noqa: BLE001
                 logger.debug("targeted bf1 layer %s bf3 fail: %s", li, exc)
 
             if do_pf3:
                 try:
+                    inputs = wrapper.build_inputs_from_sample(rec["sample"])
+                    spans = wrapper.adapter.get_spans(wrapper, inputs)
+                    query_span = spans.preferred_query_span()
+                    del inputs
                     with ablate_layer(
                         wrapper,
                         li,
                         mode,
                         noise_std,
-                        token_span=rec["query_span"],
+                        token_span=query_span,
                     ):
                         pf3_meta = IM.pf3_curve_with_meta_from_sample(
                             wrapper,
@@ -330,9 +353,16 @@ def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
                             num_seeds=pf3_seeds,
                         )
                     if pf3_meta["curve"] is not None:
-                        pf3_curves.append(pf3_meta["curve"])
+                        curve_arr = np.asarray(pf3_meta["curve"], dtype=float)
+                        pf3_curves.append(curve_arr)
+                        layer_pf3_by_id[rec["id"]] = {
+                            "curve": curve_arr,
+                            "scalar": IM.pf3_reduce(curve_arr)[pf3_key],
+                        }
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("targeted bf1 layer %s pf3 fail: %s", li, exc)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         rec_out = {
             "layer": li,
@@ -341,6 +371,7 @@ def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
             "bf3_curve": None,
             "pf3_curve": None,
             "delta": {},
+            "pf3_pairing": None,
         }
         if bf3_curves and baseline.get("bf3"):
             m = np.mean(np.stack(bf3_curves), axis=0)
@@ -351,7 +382,21 @@ def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
             m = np.mean(np.stack(pf3_curves), axis=0)
             rec_out["pf3_curve"] = m.tolist()
             rec_out["pf3"] = IM.pf3_reduce(m)
-            rec_out["delta"]["pf3"] = baseline["pf3"][pf3_key] - rec_out["pf3"][pf3_key]
+            common_ids = sorted(set(baseline_pf3_by_id) & set(layer_pf3_by_id))
+            rec_out["pf3_pairing"] = {
+                "n_baseline": len(baseline_pf3_by_id),
+                "n_layer": len(layer_pf3_by_id),
+                "n_paired": len(common_ids),
+                "paired_sample_ids_preview": common_ids[:10],
+            }
+            if common_ids:
+                rec_out["delta"]["pf3"] = float(np.mean([
+                    baseline_pf3_by_id[sid]["scalar"] - layer_pf3_by_id[sid]["scalar"]
+                    for sid in common_ids
+                ]))
+            else:
+                rec_out["delta"]["pf3"] = None
+                rec_out["pf3_pairing"]["reason"] = "no_paired_pf3_samples"
         results.append(rec_out)
         logger.info("[%s] targeted layer %02d/%d Δbf3(%s)=%s Δpf3(%s)=%s",
                     model_tag, li, wrapper.n_layers, bf3_key,

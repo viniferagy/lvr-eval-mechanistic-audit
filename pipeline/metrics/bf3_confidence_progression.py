@@ -45,6 +45,7 @@ def _record_success(stats: dict, meta: dict):
             "query_target_kind": kind,
             "query_span": meta.get("query_span"),
             "image_span": meta.get("image_span"),
+            "image_preprocess": meta.get("image_preprocess"),
             "adapter_notes": meta.get("adapter_notes", {}),
         })
 
@@ -69,6 +70,7 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
                 "id": s.id,
                 "curve": curve_values.tolist(),
                 "reduction": reduce_curve(curve_values),
+                "image_preprocess": meta.get("image_preprocess"),
                 "query_target_kind": meta.get("query_target_kind"),
                 "query_span": meta.get("query_span"),
                 "image_span": meta.get("image_span"),

@@ -67,25 +67,41 @@ class QwenVLAdapter:
         cfg = getattr(wrapper, "cfg", {}) or {}
         return cfg.get("audit", {}) if isinstance(cfg, dict) else {}
 
-    def _prepare_image(self, wrapper, image):
+    def prepare_image_for_audit(self, wrapper, image):
         """
-        Optionally downscale images before processor tokenization.
+        Return a possibly downscaled image plus preprocessing metadata.
 
-        PF-3 needs eager attention, whose memory is quadratic in sequence length.
-        Qwen-VL image tokens are driven by visual resolution, so constraining the
-        input image here is the most reliable way to keep larger audit runs alive.
+        The default config preserves the original resolution. Low-memory configs
+        may set max_image_side/max_image_pixels; because this changes the visual
+        evidence seen by OCR/document samples, the decision is recorded in every
+        metric payload that uses adapter-prepared images.
         """
-        if not isinstance(image, Image.Image):
-            return image
-
         audit_cfg = self._audit_cfg(wrapper)
         max_side = audit_cfg.get("max_image_side")
         max_pixels = audit_cfg.get("max_image_pixels")
-        if max_side is None and max_pixels is None:
-            return image
+
+        if not isinstance(image, Image.Image):
+            return image, {
+                "image_original_size": None,
+                "image_processed_size": None,
+                "image_resize_applied": False,
+                "max_image_side": max_side,
+                "max_image_pixels": max_pixels,
+            }
 
         img = image.convert("RGB")
         w, h = img.size
+        meta = {
+            "image_original_size": [int(w), int(h)],
+            "image_processed_size": [int(w), int(h)],
+            "image_resize_applied": False,
+            "max_image_side": max_side,
+            "max_image_pixels": max_pixels,
+        }
+
+        if max_side is None and max_pixels is None:
+            return img, meta
+
         scale = 1.0
         if max_side is not None:
             side = max(w, h)
@@ -96,12 +112,19 @@ class QwenVLAdapter:
             if pixels > 0:
                 scale = min(scale, (float(max_pixels) / float(pixels)) ** 0.5)
         if scale >= 1.0:
-            return img
+            return img, meta
 
         new_w = max(1, int(round(w * scale)))
         new_h = max(1, int(round(h * scale)))
         resample = getattr(Image, "Resampling", Image).LANCZOS
-        return img.resize((new_w, new_h), resample=resample)
+        processed = img.resize((new_w, new_h), resample=resample)
+        meta["image_processed_size"] = [int(new_w), int(new_h)]
+        meta["image_resize_applied"] = True
+        return processed, meta
+
+    def _prepare_image(self, wrapper, image):
+        processed, _meta = self.prepare_image_for_audit(wrapper, image)
+        return processed
 
     def build_inputs(self, wrapper, image, question: str):
         image = self._prepare_image(wrapper, image)

@@ -45,10 +45,10 @@ audit:
   allow_multiple_lvr_placeholders: false
   lvr_decoding_strategy: "steps"
   lvr_steps: 16
-  # Official/default setting: preserve original input resolution.
-  # Use config.lowmem.yaml for resolution-capped PF-3/CF-2 runs.
-  max_image_side: null
-  max_image_pixels: null
+  # Resolution-capped / low-memory setting for eager-attention metrics.
+  # This is not the original-resolution setting; use config.yaml for that.
+  max_image_side: 1280
+  max_image_pixels: 1600000
 
 # 旧实验脚本中的短 tag 会自动映射到上面的可读模型名。
 model_aliases:
@@ -100,7 +100,7 @@ metrics:
 # -------- PF-3 设置 (BF-1 readout 与 CF-2 都会用) ---------------------------
 pf3:
   corruption_mode: "mask_50pct"  # BF-1 readout 时固定用哪种 corruption
-  num_seeds: 3                   # 随机 corruption 多 seed 取平均
+  num_seeds: 1                   # low-memory smoke/scale runs use one seed
 
 # -------- BF-1 : Latent Ablation -------------------------------------------
 bf1:

@@ -31,6 +31,8 @@ from pipeline.metrics.lvr_generation_trace import run as run_lvr_trace_metric
 from pipeline.results import make_metric_result
 from pipeline.degradation import curve_features
 from pipeline.analysis import run_analysis
+from pipeline import ablation as ABL
+from pipeline import internal_metrics as IM
 from pipeline.sanity import has_failed_checks, run_sanity_suite, save_sanity_reports
 
 
@@ -85,6 +87,7 @@ def test_spans():
     ]])}
     lvr_wrapper = SimpleNamespace(
         image_pad_id=image_pad_id,
+        cfg={},
         model=SimpleNamespace(config=SimpleNamespace(
             lvr_start_id=lvr_start_id,
             lvr_id=lvr_id,
@@ -108,6 +111,12 @@ def test_spans():
     except ValueError as exc:
         assert "expected <|lvr|>" in str(exc)
     print("  LVR teacher-forced missing <|lvr|> -> fail-fast ok")
+
+    lvr_wrapper.cfg = {"audit": {"allow_multiple_lvr_placeholders": True}}
+    lvr_spans = LVRQwenAdapter().get_spans(lvr_wrapper, lvr_inputs)
+    assert lvr_spans.notes["allow_multiple_lvr_placeholders"] is True
+    assert lvr_spans.notes["span_semantics"] == "continuous_span_may_include_interleaving_text"
+    print("  LVR multi-placeholder debug notes -> ok")
 
     assert get_post_image_text_span(qwen_inputs["input_ids"], image_pad_id) == (3, 6)
     for rel in ["pipeline/internal_metrics.py", "pipeline/metrics/bf3_confidence_progression.py",
@@ -179,8 +188,43 @@ def test_data_field_mapping():
     print("  jsonl custom field_map -> ok")
 
 
+def test_image_resize_metadata():
+    print("\n== 5. image resize metadata ==")
+    adapter = QwenVLAdapter("qwen2_5_vl")
+    img = Image.new("RGB", (2000, 1000), color=(128, 128, 128))
+    wrapper = SimpleNamespace(cfg={"audit": {"max_image_side": 1000, "max_image_pixels": None}})
+    processed, meta = adapter.prepare_image_for_audit(wrapper, img)
+    assert processed.size == (1000, 500)
+    assert meta["image_original_size"] == [2000, 1000]
+    assert meta["image_processed_size"] == [1000, 500]
+    assert meta["image_resize_applied"] is True
+
+    wrapper = SimpleNamespace(cfg={"audit": {"max_image_side": None, "max_image_pixels": None}})
+    processed, meta = adapter.prepare_image_for_audit(wrapper, img)
+    assert processed.size == (2000, 1000)
+    assert meta["image_resize_applied"] is False
+    print("  resize metadata and default no-resize -> ok")
+
+
+def test_pf3_corrupt_after_resize():
+    print("\n== 6. PF-3 corruption after resize ==")
+    adapter = QwenVLAdapter("qwen2_5_vl")
+    wrapper = SimpleNamespace(
+        adapter=adapter,
+        cfg={"audit": {"max_image_side": 1000, "max_image_pixels": None}},
+    )
+    img = Image.new("RGB", (2000, 1000), color=(255, 255, 255))
+    processed, meta = IM.prepare_image_for_audit(wrapper, img)
+    corr = corrupt_image(processed, "mask", seed=0, severity=0)
+    assert processed.size == (1000, 500)
+    assert corr.size == processed.size
+    assert np.array_equal(np.asarray(corr), np.asarray(processed))
+    assert meta["image_resize_applied"] is True
+    print("  corruption operates on processed clean image -> ok")
+
+
 def test_lvr_json_loader():
-    print("\n== 5. LVR JSON loader ==")
+    print("\n== 7. LVR JSON loader ==")
     out_dir = tempfile.mkdtemp(prefix="lvr_json_")
     os.makedirs(os.path.join(out_dir, "viscot/flickr30k"), exist_ok=True)
     img_rel = "viscot/flickr30k/sample.png"
@@ -241,9 +285,23 @@ def test_lvr_json_loader():
     assert samples == []
     print("  missing assistant-side <lvr> skipped by default -> ok")
 
+    limited_path = os.path.join(out_dir, "limited_lvr.json")
+    records = data + [dict(data[0], question_id=31594), dict(data[0], question_id=31595)]
+    with open(limited_path, "w", encoding="utf-8") as f:
+        json.dump(records, f)
+    samples = load_probe_set({
+        "source_type": "lvr_json",
+        "json_path": limited_path,
+        "image_root": out_dir,
+        "max_scan_records": 1,
+        "skip_missing_images": False,
+    })
+    assert len(samples) == 0  # current data[0] was mutated to remove <lvr>
+    print("  max_scan_records limits LVR JSON scan -> ok")
+
 
 def test_lvr_assistant_expansion():
-    print("\n== 6. LVR assistant expansion ==")
+    print("\n== 8. LVR assistant expansion ==")
     sample = SimpleNamespace(
         lvr_assistant="<lvr>\n<answer>B</answer>",
         answer="B",
@@ -264,7 +322,16 @@ def test_lvr_assistant_expansion():
         lvr_assistant="<lvr>\nmid\n<lvr>\n<answer>B</answer>",
         answer="B",
     )
-    multi_text = adapter._teacher_forced_assistant_text(wrapper, multi_sample)
+    try:
+        adapter._teacher_forced_assistant_text(wrapper, multi_sample)
+        raise AssertionError("multiple <lvr> blocks should fail by default")
+    except ValueError as exc:
+        assert "exactly one <lvr> block" in str(exc)
+
+    multi_wrapper = SimpleNamespace(
+        cfg={"audit": {"lvr_num_tokens": 3, "allow_multiple_lvr_placeholders": True}}
+    )
+    multi_text = adapter._teacher_forced_assistant_text(multi_wrapper, multi_sample)
     assert "<lvr>" not in multi_text
     assert multi_text.count("<|lvr_start|>") == 2
     assert multi_text.count("<|lvr|>") == 6
@@ -304,7 +371,7 @@ def test_lvr_assistant_expansion():
 
 
 def test_lvr_trace_position_extraction():
-    print("\n== 7. LVR generation trace position extraction ==")
+    print("\n== 9. LVR generation trace position extraction ==")
     try:
         import torch
     except ImportError:
@@ -341,7 +408,7 @@ def test_lvr_trace_position_extraction():
 
 
 def test_lvr_trace_metric_payload():
-    print("\n== 8. LVR trace metric payload fields ==")
+    print("\n== 10. LVR trace metric payload fields ==")
 
     class FakeAdapter:
         def generate_with_trace(self, wrapper, image, question, **kwargs):
@@ -371,6 +438,18 @@ def test_lvr_trace_metric_payload():
     assert rec["lvr_block_spans"] == [[2, 7]]
     assert rec["unexpected_lvr_inner_positions"] == []
     print("  trace metric preserves latent_end/block metadata -> ok")
+
+
+def test_bf1_does_not_cache_gpu_inputs_static():
+    print("\n== 11. BF-1 targeted cache policy ==")
+    import inspect
+
+    source = inspect.getsource(ABL.run_targeted_ablation_sweep)
+    assert '"inputs": inputs' not in source
+    assert '"inputs"' not in source.split("prepared.append", 1)[1].split("})", 1)[0]
+    assert "baseline_pf3_by_id" in source
+    assert "n_paired" in source
+    print("  targeted BF-1 does not store prepared GPU inputs; PF3 delta is paired -> ok")
 
 
 def fake_bf1(tag, n_layers=28, strength=1.0):
@@ -410,7 +489,7 @@ def fake_cf2(tag, robust=1.0):
 
 
 def test_end_to_end():
-    print("\n== 9. sanity + 端到端 analysis(合成数据) ==")
+    print("\n== 12. sanity + 端到端 analysis(合成数据) ==")
     ablation = {
         "qwen2_5_vl_7b": fake_bf1("qwen2_5_vl_7b", strength=1.4),
         "lvr_7b": fake_bf1("lvr_7b", strength=0.7),
@@ -452,10 +531,13 @@ def main():
     test_spans()
     test_reductions()
     test_data_field_mapping()
+    test_image_resize_metadata()
+    test_pf3_corrupt_after_resize()
     test_lvr_json_loader()
     test_lvr_assistant_expansion()
     test_lvr_trace_position_extraction()
     test_lvr_trace_metric_payload()
+    test_bf1_does_not_cache_gpu_inputs_static()
     test_end_to_end()
     print("\nSMOKE TEST PASSED ✅")
 
