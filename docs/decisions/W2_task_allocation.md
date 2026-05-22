@@ -58,7 +58,11 @@ Week 2 converts the Week 1 foundation into primary metric code. The work is spli
 
 ## Batch 5: Model Go/No-Go Scaffolding
 
+- Status: complete in commit batch 5.
 - Owner: adapter line.
 - Goal: document and scaffold Monet / Latent Sketchpad / CrystaL adapter probes without committing to unstable weights.
 - Implementation target: `docs/decisions/M-W2.md` plus lightweight adapter sanity stubs.
-- Acceptance: decision document records public-weight availability, hookability, and whether each model enters the main pool.
+- Implementation result: `docs/decisions/M-W2.md` records Monet, Latent Sketchpad, and CrystaL as no-go for Week 2 main pool until public weights and hook paths are verified. `pipeline/adapters/probe_catalog.py` exposes machine-readable static probe metadata without importing model libraries or touching the network.
+- Acceptance evidence:
+  - `./venv/bin/python -m py_compile run_all.py smoke_test.py merge_and_analyze.py pipeline/*.py pipeline/sanity/*.py pipeline/metrics/*.py pipeline/metrics/legacy/*.py pipeline/metrics/v2/*.py pipeline/adapters/*.py pipeline/stats/*.py`
+  - `./venv/bin/python smoke_test.py`

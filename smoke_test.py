@@ -25,6 +25,7 @@ import yaml
 
 from pipeline.adapters.lvr_qwen import LVRQwenAdapter
 from pipeline.adapters.lvr_qwen_traced import TraceRecorder
+from pipeline.adapters.probe_catalog import list_adapter_probes, validate_adapter_probes
 from pipeline.adapters.qwen_vl import QwenVLAdapter
 from pipeline.corruptions import apply_mask, irrelevant_mask, random_mask, relevant_mask
 from pipeline.data import load_probe_set
@@ -948,6 +949,17 @@ def test_cf_stage_and_pf_b_fixtures():
     print("  CF-Stage stage reducer + PF-B native alignment fixture -> ok")
 
 
+def test_adapter_probe_catalog():
+    print("\n== 10i. adapter probe catalog ==")
+    probes = list_adapter_probes()
+    summary = validate_adapter_probes(probes)
+    assert summary["all_complete"] is True
+    assert summary["n_models"] == 3
+    assert set(summary["model_ids"]) == {"monet", "latent_sketchpad", "crystal"}
+    assert summary["main_pool_ready"] == []
+    print("  Monet / Latent Sketchpad / CrystaL go-no-go metadata -> ok")
+
+
 def test_bf1_does_not_cache_gpu_inputs_static():
     print("\n== 11. BF-1 targeted cache policy ==")
     import inspect
@@ -1053,6 +1065,7 @@ def main():
     test_bf_patch_metric_fixture()
     test_bf_swap_and_conf_fixtures()
     test_cf_stage_and_pf_b_fixtures()
+    test_adapter_probe_catalog()
     test_bf1_does_not_cache_gpu_inputs_static()
     test_end_to_end()
     print("\nSMOKE TEST PASSED ✅")
