@@ -45,10 +45,16 @@ Week 2 converts the Week 1 foundation into primary metric code. The work is spli
 
 ## Batch 4: CF-Stage And PF-B
 
+- Status: complete in commit batch 4.
 - Owner: retention/alignment line.
 - Goal: add stagewise early/mid/late aggregation and native/DINO alignment entrypoints.
 - Implementation target: `cf_stage_decay.py`, `pf_b_patch_alignment.py`, and optional DINO dependency gating.
-- Acceptance: CPU schema smoke passes; GPU smoke can run native-only PF-B without DINO if DINO weights are absent.
+- Implementation result: `cf_stage_decay` aggregates BF/PF curves into early/mid/late stage retention over severity. `pf_b_patch_alignment` computes native query-image attention alignment for relevant, irrelevant, and random masks; DINO is recorded as an optional backend and is not required for native smoke.
+- Acceptance evidence:
+  - `./venv/bin/python -m py_compile run_all.py smoke_test.py merge_and_analyze.py pipeline/*.py pipeline/sanity/*.py pipeline/metrics/*.py pipeline/metrics/legacy/*.py pipeline/metrics/v2/*.py pipeline/adapters/*.py pipeline/stats/*.py`
+  - `./venv/bin/python smoke_test.py`
+  - `bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py --config /tmp/lvr_gpu_cf_stage_pf_b_qwen3b.yaml --models qwen2_5_vl_3b --only cf_stage_decay pf_b_patch_alignment --device cuda:0 --run-name gpu_week2_cf_stage_pf_b_qwen3b_smoke`
+- GPU artifact: `runs/gpu_week2_cf_stage_pf_b_qwen3b_smoke/metrics/cf_stage_decay_qwen2_5_vl_3b.json` reports `early_auc=5.891647954781851`, `mid_auc=7.6853365302085885`, `late_auc=5.4887053829928245`, and `late_retention=0.94361640314201`. `pf_b_patch_alignment_qwen2_5_vl_3b.json` reports `native_alignment=0.8768419404163582`, `irrelevant_alignment=0.6975607557111815`, `random_alignment=0.668779024642434`, and DINO `available=false` with reason `optional_backend_not_configured`; `summary_with_ci.json` includes both metrics; sanity summary status is `pass`.
 
 ## Batch 5: Model Go/No-Go Scaffolding
 

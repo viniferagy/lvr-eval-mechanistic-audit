@@ -45,6 +45,8 @@ _ALIASES.update({
     "bf_patch": "bf_patch_answer_transfer",
     "bf_swap": "bf_swap_latent_replacement",
     "bf_conf": "bf_conf_calibrated_progression",
+    "cf_stage": "cf_stage_decay",
+    "pf_b": "pf_b_patch_alignment",
 })
 
 

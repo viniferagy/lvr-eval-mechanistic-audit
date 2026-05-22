@@ -39,6 +39,8 @@ from pipeline.metrics.v2.bf_patch_answer_transfer import (
 )
 from pipeline.metrics.v2.bf_conf_calibrated_progression import run as run_bf_conf_metric
 from pipeline.metrics.v2.bf_swap_latent_replacement import run as run_bf_swap_metric
+from pipeline.metrics.v2.cf_stage_decay import stage_reduce
+from pipeline.metrics.v2.pf_b_patch_alignment import run as run_pf_b_metric
 from pipeline.metrics.lvr_generation_trace import run as run_lvr_trace_metric
 from pipeline.preregistration import build_lock_payload, hash_manifest, load_manifest
 from pipeline.results import make_metric_result
@@ -893,6 +895,59 @@ def test_bf_swap_and_conf_fixtures():
     print("  BF-Swap and BF-Conf emit runnable reductions and registry aliases -> ok")
 
 
+def test_cf_stage_and_pf_b_fixtures():
+    print("\n== 10h. CF-Stage / PF-B fixtures ==")
+    from pipeline.data import ProbeSample
+
+    stages = stage_reduce(np.arange(9, dtype=float))
+    assert stages == {"early": 1.0, "mid": 4.0, "late": 7.0}
+    assert normalize_metric_id("cf_stage") == "cf_stage_decay"
+    assert normalize_metric_id("pf_b") == "pf_b_patch_alignment"
+
+    class FakeInternal:
+        calls = []
+
+        @staticmethod
+        def query_image_attention_kl_with_meta_from_sample(_wrapper, sample, masked_image):
+            arr = np.asarray(masked_image.convert("RGB"))
+            dark = float((arr == 0).all(axis=2).mean())
+            FakeInternal.calls.append(dark)
+            return {
+                "curve": np.asarray([dark, dark * 2.0, dark * 3.0]),
+                "skip_reasons": {},
+                "query_target_kind": "fixture",
+                "query_span": [1, 2],
+                "image_span": [0, 1],
+            }
+
+        @staticmethod
+        def pf3_reduce(curve):
+            return IM.pf3_reduce(curve)
+
+    import pipeline.metrics.v2.pf_b_patch_alignment as pf_b_mod
+
+    old_im = pf_b_mod.IM
+    pf_b_mod.IM = FakeInternal
+    try:
+        sample = ProbeSample(
+            id="fixture",
+            image=Image.new("RGB", (16, 16), color=(255, 255, 255)),
+            question="Where is the target?",
+            answer="top-left",
+            bboxes=[[0.0, 0.0, 0.5, 0.5]],
+        )
+        result = run_pf_b_metric(None, [sample], {"pf_b": {"seed": 3}}, "fake")
+    finally:
+        pf_b_mod.IM = old_im
+
+    assert result["schema"]["status"] == "runnable_native_v0"
+    assert result["reduction"]["n"] == 1
+    assert result["samples"][0]["dino"]["available"] is False
+    assert result["samples"][0]["native_alignment"] is not None
+    assert len(FakeInternal.calls) == 3
+    print("  CF-Stage stage reducer + PF-B native alignment fixture -> ok")
+
+
 def test_bf1_does_not_cache_gpu_inputs_static():
     print("\n== 11. BF-1 targeted cache policy ==")
     import inspect
@@ -997,6 +1052,7 @@ def main():
     test_pf_a_metric_fixture()
     test_bf_patch_metric_fixture()
     test_bf_swap_and_conf_fixtures()
+    test_cf_stage_and_pf_b_fixtures()
     test_bf1_does_not_cache_gpu_inputs_static()
     test_end_to_end()
     print("\nSMOKE TEST PASSED ✅")
