@@ -44,6 +44,11 @@ audit:
   allow_synthetic_lvr_assistant: false
   lvr_decoding_strategy: "steps"
   lvr_steps: 16
+  # Optional pre-tokenization image downscale for eager-attention metrics.
+  # PF-3/CF-2 memory is roughly quadratic in total sequence length, so these
+  # caps are the safest knob for scaling real runs.
+  max_image_side: 672
+  max_image_pixels: 451584      # 672 * 672
 
 # 旧实验脚本中的短 tag 会自动映射到上面的可读模型名。
 model_aliases:

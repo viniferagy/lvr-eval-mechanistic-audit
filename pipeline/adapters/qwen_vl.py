@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 
+from PIL import Image
 import torch
 
 from .base import ModelBundle
@@ -62,7 +63,48 @@ class QwenVLAdapter:
             logger.warning("image_pad token '%s' 不在词表，image span 定位可能失效", tok_text)
         return image_pad_id
 
+    def _audit_cfg(self, wrapper) -> dict:
+        cfg = getattr(wrapper, "cfg", {}) or {}
+        return cfg.get("audit", {}) if isinstance(cfg, dict) else {}
+
+    def _prepare_image(self, wrapper, image):
+        """
+        Optionally downscale images before processor tokenization.
+
+        PF-3 needs eager attention, whose memory is quadratic in sequence length.
+        Qwen-VL image tokens are driven by visual resolution, so constraining the
+        input image here is the most reliable way to keep larger audit runs alive.
+        """
+        if not isinstance(image, Image.Image):
+            return image
+
+        audit_cfg = self._audit_cfg(wrapper)
+        max_side = audit_cfg.get("max_image_side")
+        max_pixels = audit_cfg.get("max_image_pixels")
+        if max_side is None and max_pixels is None:
+            return image
+
+        img = image.convert("RGB")
+        w, h = img.size
+        scale = 1.0
+        if max_side is not None:
+            side = max(w, h)
+            if side > 0:
+                scale = min(scale, float(max_side) / float(side))
+        if max_pixels is not None:
+            pixels = w * h
+            if pixels > 0:
+                scale = min(scale, (float(max_pixels) / float(pixels)) ** 0.5)
+        if scale >= 1.0:
+            return img
+
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
+        resample = getattr(Image, "Resampling", Image).LANCZOS
+        return img.resize((new_w, new_h), resample=resample)
+
     def build_inputs(self, wrapper, image, question: str):
+        image = self._prepare_image(wrapper, image)
         messages = [{"role": "user", "content": [
             {"type": "image", "image": image},
             {"type": "text", "text": question},
@@ -102,6 +144,7 @@ class QwenVLAdapter:
     @torch.no_grad()
     def generate(self, wrapper, images: list, prompts: list[str],
                  max_new_tokens: int = 64) -> list[str]:
+        images = [self._prepare_image(wrapper, image) for image in images]
         messages = [[{"role": "user", "content": [
             {"type": "image", "image": image},
             {"type": "text", "text": prompt},

@@ -264,23 +264,84 @@ def _kl_safe(p: torch.Tensor, q: torch.Tensor, eps=1e-8) -> torch.Tensor:
 
 
 @_no_grad()
+def _forward_query_image_attn_from_inputs(wrapper, inputs) -> dict:
+    """
+    Run one eager-attention forward while retaining only query->image slices.
+
+    Returning all layer attentions keeps O(layers * seq_len^2) tensors alive.
+    A forward hook captures the small [heads, query, image] slice per layer on
+    CPU, then replaces the layer's attention output with a tiny tensor so the
+    model output does not accumulate full attention maps.
+    """
+    spans = wrapper.adapter.get_spans(wrapper, inputs, None)
+    query_span = spans.preferred_query_span()
+    image_span = spans.image_tokens
+    captured: list[torch.Tensor | None] = [None] * wrapper.n_layers
+    handles = []
+
+    def make_hook(idx: int):
+        def hook(_module, _args, output):
+            if not isinstance(output, tuple) or len(output) < 2:
+                return output
+            attn = output[1]
+            if not torch.is_tensor(attn) or attn.dim() < 4:
+                return output
+            captured[idx] = (
+                attn[0, :, query_span.start:query_span.end, image_span.start:image_span.end]
+                .detach()
+                .float()
+                .cpu()
+            )
+            out = list(output)
+            out[1] = attn.new_empty((0,))
+            return tuple(out)
+        return hook
+
+    for idx, layer in enumerate(wrapper.layers):
+        handles.append(layer.register_forward_hook(make_hook(idx)))
+
+    try:
+        try:
+            wrapper.model(
+                **inputs,
+                output_hidden_states=False,
+                output_attentions=True,
+                return_dict=True,
+                use_cache=False,
+            )
+        except TypeError:
+            wrapper.model(
+                **inputs,
+                output_hidden_states=False,
+                output_attentions=True,
+                return_dict=True,
+            )
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    missing = [idx for idx, value in enumerate(captured) if value is None]
+    if missing:
+        raise RuntimeError(f"PF-3 hook did not capture attention for layers: {missing[:5]}")
+    return {
+        "query_image_attn": captured,
+        "input_ids": inputs["input_ids"],
+        "inputs": inputs,
+        "spans": spans,
+        "seq_len": inputs["input_ids"].shape[1],
+    }
+
+
+@_no_grad()
 def _forward_attn(wrapper, image: Image.Image, question: str) -> dict:
     inputs = _build_inputs(wrapper, image=image, question=question)
-    out = wrapper.model(**inputs, output_hidden_states=False,
-                        output_attentions=True, return_dict=True)
-    spans = wrapper.adapter.get_spans(wrapper, inputs, out)
-    return {"attentions": out.attentions, "input_ids": inputs["input_ids"],
-            "inputs": inputs, "spans": spans, "seq_len": inputs["input_ids"].shape[1]}
+    return _forward_query_image_attn_from_inputs(wrapper, inputs)
 
 
 @_no_grad()
 def _forward_attn_from_sample(wrapper, sample) -> dict:
     inputs = _build_inputs(wrapper, sample=sample)
-    out = wrapper.model(**inputs, output_hidden_states=False,
-                        output_attentions=True, return_dict=True)
-    spans = wrapper.adapter.get_spans(wrapper, inputs, out)
-    return {"attentions": out.attentions, "input_ids": inputs["input_ids"],
-            "inputs": inputs, "spans": spans, "seq_len": inputs["input_ids"].shape[1]}
+    return _forward_query_image_attn_from_inputs(wrapper, inputs)
 
 
 @_no_grad()
@@ -295,15 +356,10 @@ def pf3_curve_with_meta(wrapper, image: Image.Image, question: str,
     """
     intact = _forward_attn(wrapper, image, question)
     intact_T = intact["seq_len"]
-    intact_attns = intact["attentions"]
+    intact_attns = intact["query_image_attn"]
     spans = intact["spans"]
     query_span = spans.preferred_query_span()
     image_span = spans.image_tokens
-    image_idx = torch.arange(
-        image_span.start,
-        image_span.end,
-        device=intact["input_ids"].device,
-    )
 
     n_layers = len(intact_attns)
     per_seed = []
@@ -315,11 +371,11 @@ def pf3_curve_with_meta(wrapper, image: Image.Image, question: str,
         if corr["seq_len"] != intact_T:        # token 数必须一致
             skip_reasons["seq_len_mismatch"] = skip_reasons.get("seq_len_mismatch", 0) + 1
             continue
-        corr_attns = corr["attentions"]
+        corr_attns = corr["query_image_attn"]
         per_layer = []
         for li in range(n_layers):
-            Ai = intact_attns[li][0][:, query_span.start:query_span.end, :][:, :, image_idx]
-            Ac = corr_attns[li][0][:, query_span.start:query_span.end, :][:, :, image_idx]
+            Ai = intact_attns[li]
+            Ac = corr_attns[li]
             Ai = Ai / (Ai.sum(dim=-1, keepdim=True) + 1e-8)
             Ac = Ac / (Ac.sum(dim=-1, keepdim=True) + 1e-8)
             per_layer.append(_kl_safe(Ai.float(), Ac.float()).mean().item())
@@ -348,15 +404,10 @@ def pf3_curve_with_meta_from_sample(wrapper, sample,
     """
     intact = _forward_attn_from_sample(wrapper, sample)
     intact_T = intact["seq_len"]
-    intact_attns = intact["attentions"]
+    intact_attns = intact["query_image_attn"]
     spans = intact["spans"]
     query_span = spans.preferred_query_span()
     image_span = spans.image_tokens
-    image_idx = torch.arange(
-        image_span.start,
-        image_span.end,
-        device=intact["input_ids"].device,
-    )
 
     n_layers = len(intact_attns)
     per_seed = []
@@ -368,11 +419,11 @@ def pf3_curve_with_meta_from_sample(wrapper, sample,
         if corr["seq_len"] != intact_T:
             skip_reasons["seq_len_mismatch"] = skip_reasons.get("seq_len_mismatch", 0) + 1
             continue
-        corr_attns = corr["attentions"]
+        corr_attns = corr["query_image_attn"]
         per_layer = []
         for li in range(n_layers):
-            Ai = intact_attns[li][0][:, query_span.start:query_span.end, :][:, :, image_idx]
-            Ac = corr_attns[li][0][:, query_span.start:query_span.end, :][:, :, image_idx]
+            Ai = intact_attns[li]
+            Ac = corr_attns[li]
             Ai = Ai / (Ai.sum(dim=-1, keepdim=True) + 1e-8)
             Ac = Ac / (Ac.sum(dim=-1, keepdim=True) + 1e-8)
             per_layer.append(_kl_safe(Ai.float(), Ac.float()).mean().item())

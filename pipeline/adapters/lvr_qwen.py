@@ -191,12 +191,13 @@ class LVRQwenAdapter(QwenVLAdapter):
         return f"{self._make_lvr_sequence(wrapper, sample)}\n<answer>{answer}</answer>"
 
     def build_teacher_forced_inputs_from_sample(self, wrapper, sample):
+        image = self._prepare_image(wrapper, sample.image)
         assistant_text = self._teacher_forced_assistant_text(wrapper, sample)
         messages = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "image", "image": sample.image},
+                    {"type": "image", "image": image},
                     {"type": "text", "text": sample.question},
                 ],
             },
@@ -212,7 +213,7 @@ class LVRQwenAdapter(QwenVLAdapter):
         )
         inputs = wrapper.processor(
             text=[text],
-            images=[sample.image],
+            images=[image],
             padding=True,
             return_tensors="pt",
         ).to(wrapper.model.device)
@@ -346,6 +347,7 @@ class LVRQwenAdapter(QwenVLAdapter):
         output_attentions: bool = True,
         output_hidden_states: bool = True,
     ) -> dict:
+        image = self._prepare_image(wrapper, image)
         messages = [{"role": "user", "content": [
             {"type": "image", "image": image},
             {"type": "text", "text": question},
