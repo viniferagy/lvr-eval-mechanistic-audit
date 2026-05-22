@@ -43,6 +43,8 @@ _ALIASES.update({
     "lvr_trace_legacy": "lvr_generation_trace_legacy",
     "pf_a": "pf_a_corruption_selectivity",
     "bf_patch": "bf_patch_answer_transfer",
+    "bf_swap": "bf_swap_latent_replacement",
+    "bf_conf": "bf_conf_calibrated_progression",
 })
 
 

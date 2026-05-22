@@ -32,10 +32,16 @@ Week 2 converts the Week 1 foundation into primary metric code. The work is spli
 
 ## Batch 3: BF-Swap And BF-Conf
 
+- Status: complete in commit batch 3.
 - Owner: behavior-faithfulness line.
 - Goal: add controlled latent replacement and calibrated confidence progression modules.
 - Implementation target: new v2 modules under `pipeline/metrics/v2/`.
-- Acceptance: no OOD zero-ablation primary scalar; BF-Conf reports text-only control and gold-token slope where answer tokens are available.
+- Implementation result: `bf_swap_latent_replacement` performs paired hidden-state replacement from counterfactual source to clean target and reports swap margin shift / answer-transfer rate. `bf_conf_calibrated_progression` wraps BF-3 confidence progression with answer-token logit slope and a recorded text-only control, avoiding OOD zero-ablation as the primary scalar.
+- Acceptance evidence:
+  - `./venv/bin/python -m py_compile run_all.py smoke_test.py merge_and_analyze.py pipeline/*.py pipeline/sanity/*.py pipeline/metrics/*.py pipeline/metrics/legacy/*.py pipeline/metrics/v2/*.py pipeline/adapters/*.py pipeline/stats/*.py`
+  - `./venv/bin/python smoke_test.py`
+  - `bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py --config /tmp/lvr_gpu_bf_swap_conf_qwen3b.yaml --models qwen2_5_vl_3b --only bf_swap_latent_replacement bf_conf_calibrated_progression --device cuda:0 --run-name gpu_week2_bf_swap_conf_qwen3b_smoke`
+- GPU artifact: `runs/gpu_week2_bf_swap_conf_qwen3b_smoke/metrics/bf_swap_latent_replacement_qwen2_5_vl_3b.json` reports `n_paired=1`, `n_cells=1`, `swap_margin_shift=0.0`, `swap_answer_transfer_rate=0.0`, `n_success=1`, `n_error=0`. `bf_conf_calibrated_progression_qwen2_5_vl_3b.json` reports `early_to_late_drop=1.5879336893558502`, `gold_logit_slope=0.11714124839124847`, and `text_only_control_rate=1.0`; `summary_with_ci.json` includes both metrics; sanity summary status is `pass`.
 
 ## Batch 4: CF-Stage And PF-B
 

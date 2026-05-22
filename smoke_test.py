@@ -37,6 +37,8 @@ from pipeline.metrics.v2.bf_patch_answer_transfer import (
     patch_one_pair,
     run as run_bf_patch_metric,
 )
+from pipeline.metrics.v2.bf_conf_calibrated_progression import run as run_bf_conf_metric
+from pipeline.metrics.v2.bf_swap_latent_replacement import run as run_bf_swap_metric
 from pipeline.metrics.lvr_generation_trace import run as run_lvr_trace_metric
 from pipeline.preregistration import build_lock_payload, hash_manifest, load_manifest
 from pipeline.results import make_metric_result
@@ -774,6 +776,123 @@ def test_bf_patch_metric_fixture():
     print("  BF-Patch captures source hidden states, patches target, and cleans hooks -> ok")
 
 
+def test_bf_swap_and_conf_fixtures():
+    print("\n== 10g. BF-Swap / BF-Conf fixtures ==")
+    import torch
+    import torch.nn as nn
+    from pipeline.adapters.spans import AuditSpans, TokenSpan
+    from pipeline.data import ProbeSample
+
+    class TinyTokenizer:
+        vocab = {"red": 1, "blue": 2}
+
+        def encode(self, text, add_special_tokens=False):
+            return [self.vocab[str(text).strip()]]
+
+        def __call__(self, text, add_special_tokens=False, return_tensors=None):
+            return {"input_ids": [self.vocab[str(text).strip()]]}
+
+        def decode(self, ids, skip_special_tokens=True):
+            inv = {v: k for k, v in self.vocab.items()}
+            return inv.get(int(ids[0]), str(ids[0]))
+
+    class TinyLayer(nn.Module):
+        def __init__(self, idx):
+            super().__init__()
+            self.idx = idx
+
+        def forward(self, hidden):
+            return hidden + (self.idx + 1) * 0.2
+
+    class TinyModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([TinyLayer(0), TinyLayer(1), TinyLayer(2)])
+            self.device = torch.device("cpu")
+
+        def forward(self, input_ids, **kwargs):
+            hidden = input_ids.float().unsqueeze(-1).repeat(1, 1, 4)
+            for layer in self.layers:
+                hidden = layer(hidden)
+            logits = torch.zeros(hidden.shape[0], hidden.shape[1], 4)
+            logits[..., 1] = hidden[..., 0] * 0.3
+            logits[..., 2] = hidden[..., 0] * 1.2
+            return SimpleNamespace(logits=logits)
+
+    class TinyNorm(nn.Module):
+        def forward(self, hidden):
+            return hidden
+
+    class TinyHead(nn.Module):
+        def forward(self, hidden):
+            logits = torch.zeros(hidden.shape[0], 4)
+            logits[:, 1] = hidden[:, 0] * 0.3
+            logits[:, 2] = hidden[:, 0] * 1.2
+            return logits
+
+    class TinyAdapter:
+        def build_inputs(self, wrapper, image, question):
+            return {"input_ids": torch.tensor([[1.0, 2.0, 3.0, 4.0]])}
+
+        def build_inputs_from_sample(self, wrapper, sample):
+            base = 5.0 if sample.answer == "red" else 1.0
+            return {"input_ids": torch.tensor([[base, base + 1, base + 2, base + 3]])}
+
+        def get_spans(self, wrapper, inputs, model_outputs=None):
+            return AuditSpans(
+                image_tokens=TokenSpan(0, 1, "image_tokens"),
+                lvr_placeholder_tokens=TokenSpan(1, 3, "lvr_placeholder_tokens"),
+                answer_probe_pos=3,
+            )
+
+    class TinyWrapper:
+        def __init__(self):
+            self.model = TinyModel()
+            self.processor = SimpleNamespace(tokenizer=TinyTokenizer())
+            self.adapter = TinyAdapter()
+            self.layers = self.model.layers
+            self.n_layers = len(self.layers)
+            self.final_norm = TinyNorm()
+            self.lm_head = TinyHead()
+            self.device = "cpu"
+
+        def build_inputs_from_sample(self, sample):
+            return self.adapter.build_inputs_from_sample(self, sample)
+
+    wrapper = TinyWrapper()
+    sample = ProbeSample(
+        id="pair0",
+        image=Image.new("RGB", (8, 8), "white"),
+        question="color?",
+        answer="blue",
+        counterfactual_image=Image.new("RGB", (8, 8), "black"),
+        counterfactual_answer="red",
+        paired_id="pair0",
+    )
+    assert normalize_metric_id("bf_swap") == "bf_swap_latent_replacement"
+    assert normalize_metric_id("bf_conf") == "bf_conf_calibrated_progression"
+    swap = run_bf_swap_metric(
+        wrapper,
+        [sample],
+        {"bf_swap": {"layers": [0], "position_buckets": ["query"], "max_pairs": 1}},
+        "tiny",
+    )
+    assert swap["schema"]["status"] == "runnable_v0"
+    assert swap["reduction"]["n_cells"] == 1
+    assert len(swap["samples"]) == 1
+    conf = run_bf_conf_metric(
+        wrapper,
+        [sample],
+        {"bf_conf": {"text_only_control": True}},
+        "tiny",
+    )
+    assert conf["schema"]["status"] == "runnable_v0"
+    assert conf["reduction"]["n"] == 1
+    assert "gold_logit_slope" in conf["samples"][0]["reduction"]
+    assert "text_only_control" in conf["samples"][0]
+    print("  BF-Swap and BF-Conf emit runnable reductions and registry aliases -> ok")
+
+
 def test_bf1_does_not_cache_gpu_inputs_static():
     print("\n== 11. BF-1 targeted cache policy ==")
     import inspect
@@ -877,6 +996,7 @@ def main():
     test_v2_corruptions_and_patch_schema()
     test_pf_a_metric_fixture()
     test_bf_patch_metric_fixture()
+    test_bf_swap_and_conf_fixtures()
     test_bf1_does_not_cache_gpu_inputs_static()
     test_end_to_end()
     print("\nSMOKE TEST PASSED ✅")
