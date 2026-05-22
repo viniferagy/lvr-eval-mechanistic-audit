@@ -21,16 +21,22 @@ from types import SimpleNamespace
 
 import numpy as np
 from PIL import Image
+import yaml
 
-from pipeline.adapters.qwen_vl import QwenVLAdapter
 from pipeline.adapters.lvr_qwen import LVRQwenAdapter
+from pipeline.adapters.lvr_qwen_traced import TraceRecorder
+from pipeline.adapters.qwen_vl import QwenVLAdapter
+from pipeline.corruptions import apply_mask, irrelevant_mask, random_mask, relevant_mask
 from pipeline.data import load_probe_set
 from pipeline.internal_metrics import corrupt_image, get_post_image_text_span
-from pipeline.metrics import list_metrics, list_runnable_metrics, resolve_readout
+from pipeline.metrics import get_metric, list_metrics, list_runnable_metrics, normalize_metric_id, resolve_readout
+from pipeline.metrics.v2.bf_patch_answer_transfer import answer_transfer_rate, patch_grid
 from pipeline.metrics.lvr_generation_trace import run as run_lvr_trace_metric
+from pipeline.preregistration import build_lock_payload, hash_manifest, load_manifest
 from pipeline.results import make_metric_result
+from pipeline.stats.bootstrap import paired_bootstrap
 from pipeline.degradation import curve_features
-from pipeline.analysis import run_analysis
+from pipeline.analysis import build_summary_with_ci, run_analysis
 from pipeline import ablation as ABL
 from pipeline import internal_metrics as IM
 from pipeline.sanity import has_failed_checks, run_sanity_suite, save_sanity_reports
@@ -133,6 +139,18 @@ def test_reductions():
     runnable_ids = {m.metric_id for m in list_runnable_metrics()}
     assert "bf3_confidence_progression" in metric_ids
     assert "pf3_attention_distance" in metric_ids
+    assert normalize_metric_id("bf3_legacy") == "bf3_confidence_progression_legacy"
+    assert get_metric("pf3_legacy").metric_id == "pf3_attention_distance_legacy"
+    assert "lvr_generation_trace_legacy" in runnable_ids
+    legacy_summary = [
+        {"metric_id": get_metric(name).metric_id, "legacy_name": get_metric(name).legacy_name,
+         "has_run_fn": get_metric(name).run_fn is not None}
+        for name in ["bf3_legacy", "pf3_legacy", "bf1_legacy", "bf1_layer_legacy", "cf2_legacy", "lvr_trace_legacy"]
+    ]
+    assert all(row["has_run_fn"] for row in legacy_summary)
+    legacy_path = os.path.join(tempfile.gettempdir(), "legacy_registry_test.json")
+    with open(legacy_path, "w", encoding="utf-8") as f:
+        json.dump(legacy_summary, f, indent=2)
     assert "bf3_confidence_progression" in runnable_ids
     assert "pf3_attention_distance" in runnable_ids
     bf3_reduce = resolve_readout("bf3").require_reduce()
@@ -186,6 +204,72 @@ def test_data_field_mapping():
     assert samples[0].answer == "noise image"
     assert samples[0].image.size == (64, 64)
     print("  jsonl custom field_map -> ok")
+
+
+def test_spd_faith_and_maze_loaders():
+    print("\n== 4b. SPD-Faith / Maze loaders ==")
+    out_dir = tempfile.mkdtemp(prefix="lvr_new_loaders_")
+    img_a = os.path.join(out_dir, "a.png")
+    img_b = os.path.join(out_dir, "b.png")
+    maze_img = os.path.join(out_dir, "maze.png")
+    make_img(seed=10).save(img_a)
+    make_img(seed=11).save(img_b)
+    make_img(seed=12).save(maze_img)
+
+    spd_path = os.path.join(out_dir, "spd.jsonl")
+    with open(spd_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "pair_id": "p0",
+            "image_clean": "a.png",
+            "image_counterfactual": "b.png",
+            "question": "What changed?",
+            "gold_answer_clean": "red",
+            "gold_answer_counterfactual": "blue",
+            "rationale": "color changed",
+        }) + "\n")
+        f.write(json.dumps({
+            "pair_id": "missing",
+            "image_clean": "missing.png",
+            "image_counterfactual": "b.png",
+            "question": "Missing?",
+        }) + "\n")
+    spd = load_probe_set({
+        "source_type": "spd_faith",
+        "jsonl_path": spd_path,
+        "image_root": out_dir,
+        "skip_missing_images": True,
+    })
+    assert len(spd) == 1
+    assert spd[0].paired_id == "p0"
+    assert spd[0].counterfactual_image is not None
+    assert spd[0].counterfactual_answer == "blue"
+
+    maze_path = os.path.join(out_dir, "maze.json")
+    with open(maze_path, "w", encoding="utf-8") as f:
+        json.dump([{
+            "maze_id": "m0",
+            "maze_image": "maze.png",
+            "instruction": "Find the path.",
+            "path": "RRDD",
+            "steps": ["R", "R", "D", "D"],
+            "difficulty": "easy",
+        }], f)
+    maze = load_probe_set({
+        "source_type": "maze",
+        "json_path": maze_path,
+        "image_root": out_dir,
+    })
+    assert len(maze) == 1
+    assert maze[0].task_metadata["steps"] == ["R", "R", "D", "D"]
+    summary = {
+        "n_spd_pairs": len(spd),
+        "n_maze_samples": len(maze),
+        "missing_image_count": 1,
+        "paired_field_valid_rate": 1.0,
+    }
+    with open(os.path.join(out_dir, "data_loader_smoke_summary.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    print("  spd_faith + maze fixtures -> ok")
 
 
 def test_image_resize_metadata():
@@ -440,6 +524,102 @@ def test_lvr_trace_metric_payload():
     print("  trace metric preserves latent_end/block metadata -> ok")
 
 
+def test_trace_recorder_fake_model():
+    print("\n== 10b. LVR trace v2 fake hooks ==")
+    try:
+        import torch
+        import torch.nn as nn
+    except ImportError:
+        print("  torch unavailable; skip trace recorder fake model")
+        return
+
+    class FakeModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = nn.Module()
+            self.model.model = nn.Module()
+            self.model.model.embed_tokens = nn.Embedding(8, 4)
+            self.model.model.norm = nn.LayerNorm(4)
+            self.model.visual = nn.Module()
+            self.model.visual.merger = nn.Linear(4, 4)
+            self.lm_head = nn.Linear(4, 8)
+
+        def forward(self):
+            input_ids = torch.tensor([[1, 2]])
+            x = self.model.model.embed_tokens(input_ids)
+            x = self.model.visual.merger(x)
+            for layer in self.layers:
+                x = layer(x)
+            x = self.model.model.norm(x)
+            return self.lm_head(x)
+
+    model = FakeModel()
+    model.layers = nn.ModuleList([nn.Linear(4, 4) for _ in range(8)])
+    wrapper = SimpleNamespace(model=model, layers=model.layers, n_layers=len(model.layers))
+    with TraceRecorder(wrapper) as rec:
+        model.forward()
+    summary = rec.summary()
+    assert summary["trace_quality"] == "instrumented_sparse_v0"
+    assert summary["sampled_layers"] == [0, 2, 4, 6, 7]
+    assert summary["lm_head_called"] is True
+    assert summary["last_hidden_state_shape"] == [1, 1, 4]
+    with open(os.path.join(tempfile.gettempdir(), "trace_validation.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    print("  TraceRecorder captures/removes sparse hooks -> ok")
+
+
+def test_preregistration_and_bootstrap():
+    print("\n== 10c. preregistration + bootstrap CI ==")
+    manifest = load_manifest("prereg/manifest.yaml")
+    digest = hash_manifest(manifest)
+    assert digest == hash_manifest(yaml.safe_load(yaml.safe_dump(manifest, sort_keys=True)))
+    changed = dict(manifest)
+    changed["manifest_version"] = "changed"
+    assert hash_manifest(changed) != digest
+    lock = build_lock_payload(manifest, created_at="2026-05-23T00:00:00+00:00")
+    assert lock["sha256"] == digest
+    assert len(lock["primary_metrics"]) == 6
+
+    ci = paired_bootstrap([1, 2, 3, 4], seed=1, n_resamples=200)
+    assert ci is not None and ci.n == 4
+    ci2 = paired_bootstrap([2, 4, 6], [1, 2, 3], seed=1, n_resamples=200)
+    assert ci2 is not None and abs(ci2.mean - 2.0) < 1e-9
+    rows = build_summary_with_ci([
+        make_metric_result("bf3_confidence_progression_legacy", "fake", {
+            "samples": [
+                {"id": "a", "reduction": {"early_to_late_drop": 1.0}},
+                {"id": "b", "reduction": {"early_to_late_drop": 2.0}},
+            ]
+        })
+    ], seed=1)
+    assert rows and rows[0]["scalar"] == "early_to_late_drop"
+    print("  manifest hash/lock + bootstrap summary_with_ci -> ok")
+
+
+def test_v2_corruptions_and_patch_schema():
+    print("\n== 10d. v2 corruption + BF-Patch schema fixtures ==")
+    img = Image.new("RGB", (64, 64), color=(255, 255, 255))
+    rel = relevant_mask(img, bboxes=[[0.0, 0.0, 0.5, 0.5]])
+    irr = irrelevant_mask(img, rel, seed=0)
+    rnd1 = random_mask(img, coverage=0.2, seed=3)
+    rnd2 = random_mask(img, coverage=0.2, seed=3)
+    assert int((rel.data & irr.data).sum()) == 0
+    assert np.array_equal(rnd1.data, rnd2.data)
+    assert np.array_equal(np.asarray(apply_mask(img, rel, severity=0)), np.asarray(img))
+    grid = patch_grid()
+    assert len(grid) == 15
+    assert grid[0] == {"layer": 0, "position_bucket": "image"}
+    rate = answer_transfer_rate([
+        {"patched_answer": "B", "source_answer": "B"},
+        {"patched_answer": "A", "source_answer": "B"},
+    ])
+    assert rate == 0.5
+    schema_path = os.path.join(tempfile.gettempdir(), "v2_metric_schema_smoke.json")
+    with open(schema_path, "w", encoding="utf-8") as f:
+        json.dump({"pf_a_fixture": True, "bf_patch_grid_cells": len(grid)}, f, indent=2)
+    print("  PF-A masks + BF-Patch 5x3 grid -> ok")
+
+
 def test_bf1_does_not_cache_gpu_inputs_static():
     print("\n== 11. BF-1 targeted cache policy ==")
     import inspect
@@ -531,12 +711,16 @@ def main():
     test_spans()
     test_reductions()
     test_data_field_mapping()
+    test_spd_faith_and_maze_loaders()
     test_image_resize_metadata()
     test_pf3_corrupt_after_resize()
     test_lvr_json_loader()
     test_lvr_assistant_expansion()
     test_lvr_trace_position_extraction()
     test_lvr_trace_metric_payload()
+    test_trace_recorder_fake_model()
+    test_preregistration_and_bootstrap()
+    test_v2_corruptions_and_patch_schema()
     test_bf1_does_not_cache_gpu_inputs_static()
     test_end_to_end()
     print("\nSMOKE TEST PASSED ✅")

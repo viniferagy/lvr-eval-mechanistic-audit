@@ -1,0 +1,47 @@
+manifest_version: "0.1-draft"
+project: "LatentFaith-Audit"
+created_for: "week1"
+analysis_blind_seed: 260523
+stopping_rule:
+  description: "Run the preregistered sample budget per model/task unless failures are attributable to missing local data or model weights."
+  min_samples_per_model_task: 200
+  expensive_metric_subset: 50
+primary_metrics:
+  - metric_id: "pf_a_corruption_selectivity"
+    family: "PF"
+    primary_scalar: "selectivity"
+    version: "0.1-draft"
+    status: "planned"
+  - metric_id: "pf_b_patch_alignment"
+    family: "PF"
+    primary_scalar: "alignment_iou_native"
+    version: "0.1-draft"
+    status: "planned"
+  - metric_id: "bf_patch_answer_transfer"
+    family: "BF"
+    primary_scalar: "answer_transfer_rate"
+    version: "0.1-draft"
+    status: "planned"
+  - metric_id: "bf_swap_controlled_replacement"
+    family: "BF"
+    primary_scalar: "answer_flip_rate_toward_patched"
+    version: "0.1-draft"
+    status: "planned"
+  - metric_id: "bf_conf_calibrated"
+    family: "BF"
+    primary_scalar: "gold_logprob_slope_delta"
+    version: "0.1-draft"
+    status: "planned"
+  - metric_id: "cf_stage_decay"
+    family: "CF"
+    primary_scalar: "bf_causal_effect_decay_slope"
+    version: "0.1-draft"
+    status: "planned"
+statistics:
+  bootstrap:
+    ci: 0.95
+    n_resamples: 5000
+    paired: true
+  mixed_effects:
+    formula: "metric_value ~ model + task + (1|sample_id)"
+    status: "planned"

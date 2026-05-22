@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from .results import split_metric_results
+from .stats.bootstrap import paired_bootstrap
 
 logger = logging.getLogger("lvr_eval.analysis")
 
@@ -303,6 +304,59 @@ def plot_generic_metric_results(metric_results: list[dict], out_dir: str):
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
 
+def _numeric_sample_scalars(payload: dict) -> dict[str, list[float]]:
+    scalars: dict[str, list[float]] = {}
+    samples = payload.get("samples")
+    if not isinstance(samples, list):
+        return scalars
+    for record in samples:
+        if not isinstance(record, dict) or record.get("error") is not None:
+            continue
+        reduction = record.get("reduction")
+        if isinstance(reduction, dict):
+            for key, value in reduction.items():
+                try:
+                    scalars.setdefault(str(key), []).append(float(value))
+                except (TypeError, ValueError):
+                    continue
+        for key in ("scalar", "value", "selectivity", "answer_transfer_rate"):
+            if key in record:
+                try:
+                    scalars.setdefault(key, []).append(float(record[key]))
+                except (TypeError, ValueError):
+                    continue
+    return scalars
+
+
+def build_summary_with_ci(metric_results: list[dict], seed: int = 260523) -> list[dict]:
+    rows: list[dict] = []
+    for envelope in metric_results:
+        payload = envelope.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        metric_id = str(envelope.get("metric_id"))
+        model = str(envelope.get("model"))
+        for scalar, values in sorted(_numeric_sample_scalars(payload).items()):
+            ci = paired_bootstrap(values, seed=seed)
+            if ci is None:
+                rows.append({
+                    "metric_id": metric_id,
+                    "model": model,
+                    "scalar": scalar,
+                    "n": 0,
+                    "skip_reason": "empty_samples",
+                    "seed": seed,
+                })
+                continue
+            rows.append({
+                "metric_id": metric_id,
+                "model": model,
+                "scalar": scalar,
+                **ci.as_dict(),
+            })
+    return rows
+
+
 def run_analysis(ablation: dict | None, decay: dict | None, out_dir: str,
                  metric_results: list[dict] | None = None, **_):
     os.makedirs(out_dir, exist_ok=True)
@@ -313,6 +367,8 @@ def run_analysis(ablation: dict | None, decay: dict | None, out_dir: str,
         ablation.update({k: v for k, v in metric_ablation.items() if k not in ablation})
         decay.update({k: v for k, v in metric_decay.items() if k not in decay})
         plot_generic_metric_results(metric_results, out_dir)
+        with open(os.path.join(out_dir, "summary_with_ci.json"), "w", encoding="utf-8") as f:
+            json.dump(build_summary_with_ci(metric_results), f, indent=2, ensure_ascii=False)
 
     if ablation:
         plot_ablation(ablation, out_dir)

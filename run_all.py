@@ -35,6 +35,7 @@ from pipeline.metrics import (
     run_metric,
 )
 from pipeline.model_utils import load_model
+from pipeline.preregistration import DEFAULT_MANIFEST_PATH, load_manifest, write_lock
 from pipeline.results import write_metric_result
 from pipeline.sanity import (
     has_failed_checks,
@@ -289,6 +290,12 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "config_snapshot.yaml"), "w") as f:
         yaml.safe_dump(cfg, f, allow_unicode=True)
+    prereg_cfg = cfg.get("preregistration", {}) or {}
+    manifest_path = prereg_cfg.get("manifest_path", str(DEFAULT_MANIFEST_PATH))
+    if prereg_cfg.get("enabled", True):
+        manifest = load_manifest(manifest_path)
+        lock = write_lock(out_dir, manifest, manifest_path=manifest_path)
+        log.info("prereg lock = %s sha256=%s", manifest_path, lock["sha256"])
     log.info("run dir = %s", out_dir)
 
     # 数据只加载一次（所有模型共用同一 probe set，保证可比）

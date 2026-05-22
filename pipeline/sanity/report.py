@@ -42,7 +42,7 @@ def run_sanity_suite(ablation_results: dict[str, dict],
 def run_sanity_for_metric_result(metric_id: str, result: dict,
                                  cfg: dict | None = None) -> list[dict]:
     """Build sanity reports for one metric result payload."""
-    if metric_id == "bf1_latent_ablation":
+    if metric_id in {"bf1_latent_ablation", "bf1_latent_ablation_legacy"}:
         reports = [
             check_bf1_result(result, cfg),
             check_span_metadata(result, metric_id, cfg),
@@ -59,14 +59,14 @@ def run_sanity_for_metric_result(metric_id: str, result: dict,
                 cfg, source="bf1_baseline"
             ))
         return reports
-    if metric_id == "bf1_layer_ablation":
+    if metric_id in {"bf1_layer_ablation", "bf1_layer_ablation_legacy"}:
         return [
             check_bf1_result(result, cfg),
             check_span_metadata(result, metric_id, cfg),
         ]
-    if metric_id == "cf2_pf_decay_curve":
+    if metric_id in {"cf2_pf_decay_curve", "cf2_pf_decay_curve_legacy"}:
         return [check_cf2_result(result, cfg)]
-    if metric_id == "bf3_confidence_progression":
+    if metric_id in {"bf3_confidence_progression", "bf3_confidence_progression_legacy"}:
         reports = [check_span_metadata(result, metric_id, cfg)]
         if result.get("curve") is not None:
             reports.append(check_bf3_curve(
@@ -74,7 +74,7 @@ def run_sanity_for_metric_result(metric_id: str, result: dict,
                 cfg, source="standalone"
             ))
         return reports
-    if metric_id == "pf3_attention_distance":
+    if metric_id in {"pf3_attention_distance", "pf3_attention_distance_legacy"}:
         reports = [check_span_metadata(result, metric_id, cfg)]
         if result.get("curve") is not None:
             reports.append(check_pf3_curve(

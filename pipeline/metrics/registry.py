@@ -6,8 +6,10 @@ from .base import MetricSpec
 from .bf1_latent_ablation import SPEC as BF1_SPEC
 from .bf3_confidence_progression import SPEC as BF3_SPEC
 from .cf2_pf_decay_curve import SPEC as CF2_SPEC
+from .legacy import LEGACY_SPECS
 from .lvr_generation_trace import SPEC as LVR_TRACE_SPEC
 from .pf3_attention_distance import SPEC as PF3_SPEC
+from .v2 import V2_SPECS
 
 
 _SPECS = {
@@ -18,6 +20,8 @@ _SPECS = {
     CF2_SPEC.metric_id: CF2_SPEC,
     LVR_TRACE_SPEC.metric_id: LVR_TRACE_SPEC,
 }
+_SPECS.update({spec.metric_id: spec for spec in LEGACY_SPECS})
+_SPECS.update({spec.metric_id: spec for spec in V2_SPECS})
 
 _ALIASES = {
     spec.legacy_name: spec.metric_id
@@ -31,6 +35,14 @@ _ALIASES.update({
     "bf1_layer_ablation": BF1_LAYER_SPEC.metric_id,
     "cf2_pf_decay_curve": CF2_SPEC.metric_id,
     "lvr_generation_trace": LVR_TRACE_SPEC.metric_id,
+    "bf3_legacy": "bf3_confidence_progression_legacy",
+    "pf3_legacy": "pf3_attention_distance_legacy",
+    "bf1_legacy": "bf1_latent_ablation_legacy",
+    "bf1_layer_legacy": "bf1_layer_ablation_legacy",
+    "cf2_legacy": "cf2_pf_decay_curve_legacy",
+    "lvr_trace_legacy": "lvr_generation_trace_legacy",
+    "pf_a": "pf_a_corruption_selectivity",
+    "bf_patch": "bf_patch_answer_transfer",
 })
 
 

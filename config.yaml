@@ -58,7 +58,7 @@ model_aliases:
 
 # -------- Probe 数据集 (复用 BF-3/PF-3 的 audit 集; PF-3 不能用 synthetic) ----
 data:
-  source_type: "lvr_json"          # "jsonl" | "hf" | "lvr_json"
+  source_type: "lvr_json"          # "jsonl" | "hf" | "lvr_json" | "spd_faith" | "maze"
   json_path: "./data/viscot_sroie_dude_lvr_existing_images_small.json"
   jsonl_path: "./data/audit_set.jsonl"   # 每行 {"image","question","answer"?,"id"?}
   image_root: "./data/visual_cot_hf/images"
@@ -75,6 +75,28 @@ data:
   shuffle_seed: 0
   skip_missing_images: true       # LVR 图像下载未完成时先跳过缺失样本
   require_lvr_placeholder: true   # source_type=lvr_json 时要求 assistant 侧含 <lvr>
+
+  # Optional source_type=spd_faith template:
+  # json_path: "./data/spd_faith/test.json"
+  # image_root: "./data/spd_faith/images"
+  # field_map:
+  #   image: ["image_clean", "image"]
+  #   counterfactual_image: ["image_counterfactual", "counterfactual_image"]
+  #   question: "question"
+  #   answer: ["gold_answer_clean", "answer"]
+  #   counterfactual_answer: ["gold_answer_counterfactual", "counterfactual_answer"]
+  #
+  # Optional source_type=maze template:
+  # json_path: "./data/maze/test.json"
+  # image_root: "./data/maze/images"
+  # field_map:
+  #   image: ["maze_image", "image"]
+  #   question: ["instruction", "question"]
+  #   answer: ["path", "solution", "answer"]
+
+preregistration:
+  enabled: true
+  manifest_path: "prereg/manifest.yaml"
 
 inference:
   dtype: "bfloat16"

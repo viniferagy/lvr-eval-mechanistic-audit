@@ -42,6 +42,12 @@ class ProbeSample:
     bboxes: Optional[list] = None
     lvr_assistant: Optional[str] = None
     source_dataset: Optional[str] = None
+    counterfactual_image: Optional[Image.Image] = None
+    counterfactual_answer: Any = None
+    rationale: Optional[str] = None
+    region_mask: Any = None
+    paired_id: Optional[str] = None
+    task_metadata: Optional[dict] = None
 
 
 def _open_rgb(path: str) -> Image.Image:
@@ -95,6 +101,14 @@ def load_probe_set(cfg_data: dict) -> list[ProbeSample]:
         samples = _load_hf(cfg_data)
     elif src == "lvr_json":
         samples = _load_lvr_json(cfg_data)
+    elif src == "spd_faith":
+        from .data_spd_faith import load_spd_faith
+
+        samples = load_spd_faith(cfg_data)
+    elif src == "maze":
+        from .data_maze import load_maze
+
+        samples = load_maze(cfg_data)
     else:
         raise ValueError(f"未知 source_type: {src}")
 

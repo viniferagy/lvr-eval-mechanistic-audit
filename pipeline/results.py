@@ -11,7 +11,10 @@ from .metrics import get_metric
 
 LEGACY_RESULT_PREFIXES = {
     "bf1_latent_ablation": "bf1",
+    "bf1_latent_ablation_legacy": "bf1_legacy",
+    "bf1_layer_ablation_legacy": "bf1_layer_legacy",
     "cf2_pf_decay_curve": "cf2",
+    "cf2_pf_decay_curve_legacy": "cf2_legacy",
 }
 PREFIX_TO_METRIC_ID = {prefix: metric_id for metric_id, prefix in LEGACY_RESULT_PREFIXES.items()}
 
@@ -110,9 +113,9 @@ def split_metric_results(metric_results: Iterable[dict]) -> tuple[dict[str, dict
         if not isinstance(payload, dict):
             continue
         model = str(payload.get("model") or envelope.get("model") or "unknown")
-        if metric_id == "bf1_latent_ablation":
+        if metric_id in {"bf1_latent_ablation", "bf1_latent_ablation_legacy"}:
             ablation[model] = payload
-        elif metric_id == "cf2_pf_decay_curve":
+        elif metric_id in {"cf2_pf_decay_curve", "cf2_pf_decay_curve_legacy"}:
             decay[model] = payload
 
     return ablation, decay
