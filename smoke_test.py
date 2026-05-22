@@ -30,6 +30,7 @@ from pipeline.corruptions import apply_mask, irrelevant_mask, random_mask, relev
 from pipeline.data import load_probe_set
 from pipeline.internal_metrics import corrupt_image, get_post_image_text_span
 from pipeline.metrics import get_metric, list_metrics, list_runnable_metrics, normalize_metric_id, resolve_readout
+from pipeline.metrics.v2.pf_a_corruption_selectivity import run as run_pf_a_metric
 from pipeline.metrics.v2.bf_patch_answer_transfer import answer_transfer_rate, patch_grid
 from pipeline.metrics.lvr_generation_trace import run as run_lvr_trace_metric
 from pipeline.preregistration import build_lock_payload, hash_manifest, load_manifest
@@ -620,6 +621,60 @@ def test_v2_corruptions_and_patch_schema():
     print("  PF-A masks + BF-Patch 5x3 grid -> ok")
 
 
+def test_pf_a_metric_fixture(monkeypatch=None):
+    print("\n== 10e. PF-A runnable reduction fixture ==")
+    from pipeline.data import ProbeSample
+
+    class FakeInternal:
+        calls = []
+
+        @staticmethod
+        def query_image_attention_kl_with_meta_from_sample(_wrapper, sample, corrupted_image):
+            arr = np.asarray(corrupted_image.convert("RGB"))
+            dark = float((arr == 0).all(axis=2).mean())
+            FakeInternal.calls.append(dark)
+            return {
+                "curve": np.asarray([dark, dark * 2.0, dark * 3.0]),
+                "seq_len": 8,
+                "n_total": 1,
+                "n_success": 1,
+                "n_skipped": 0,
+                "skip_reasons": {},
+                "query_target_kind": "fixture",
+                "query_span": {"start": 5, "end": 6, "length": 1},
+                "image_span": {"start": 1, "end": 5, "length": 4},
+            }
+
+        @staticmethod
+        def pf3_reduce(curve):
+            return IM.pf3_reduce(curve)
+
+    import pipeline.metrics.v2.pf_a_corruption_selectivity as pf_a_mod
+
+    old_im = pf_a_mod.IM
+    pf_a_mod.IM = FakeInternal
+    try:
+        sample = ProbeSample(
+            id="fixture",
+            image=Image.new("RGB", (16, 16), color=(255, 255, 255)),
+            question="Where is the target?",
+            answer="top-left",
+            bboxes=[[0.0, 0.0, 0.5, 0.5]],
+        )
+        result = run_pf_a_metric(None, [sample], {"pf_a": {"seed": 7}}, "fake")
+    finally:
+        pf_a_mod.IM = old_im
+
+    rec = result["samples"][0]
+    assert result["schema"]["status"] == "runnable_v0"
+    assert result["config"]["comparison"] == "clean_vs_region_masked_attention_kl"
+    assert rec["selectivity"] is not None
+    assert rec["reduction"]["selectivity"] == rec["irrelevant_kl"] - rec["relevant_kl"]
+    assert result["reduction"]["n"] == 1
+    assert len(FakeInternal.calls) == 3
+    print("  PF-A metric emits selectivity/reductions from explicit masked-image KL -> ok")
+
+
 def test_bf1_does_not_cache_gpu_inputs_static():
     print("\n== 11. BF-1 targeted cache policy ==")
     import inspect
@@ -721,6 +776,7 @@ def main():
     test_trace_recorder_fake_model()
     test_preregistration_and_bootstrap()
     test_v2_corruptions_and_patch_schema()
+    test_pf_a_metric_fixture()
     test_bf1_does_not_cache_gpu_inputs_static()
     test_end_to_end()
     print("\nSMOKE TEST PASSED ✅")

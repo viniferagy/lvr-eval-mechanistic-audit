@@ -320,7 +320,7 @@ def _numeric_sample_scalars(payload: dict) -> dict[str, list[float]]:
                 except (TypeError, ValueError):
                     continue
         for key in ("scalar", "value", "selectivity", "answer_transfer_rate"):
-            if key in record:
+            if key in record and key not in scalars:
                 try:
                     scalars.setdefault(key, []).append(float(record[key]))
                 except (TypeError, ValueError):

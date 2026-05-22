@@ -46,6 +46,13 @@ def relevant_mask(image: Image.Image, bboxes=None, region_mask=None) -> BinaryMa
         for bbox in bboxes:
             left, top, right, bottom = _bbox_to_pixels(bbox, width, height)
             mask[top:bottom, left:right] = True
+    if not mask.any():
+        # Fallback for datasets without region annotations: use centered area so
+        # PF-A remains runnable but clearly records weak oracle quality.
+        h, w = mask.shape
+        y0, y1 = h // 4, (3 * h) // 4
+        x0, x1 = w // 4, (3 * w) // 4
+        mask[y0:y1, x0:x1] = True
     return BinaryMask(mask, "relevant")
 
 

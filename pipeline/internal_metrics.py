@@ -305,6 +305,29 @@ def _kl_safe(p: torch.Tensor, q: torch.Tensor, eps=1e-8) -> torch.Tensor:
     return (p * (p.log() - q.log())).sum(dim=-1)
 
 
+def _query_image_attn_kl_curve(intact: dict, corrupted: dict) -> tuple[Optional[np.ndarray], dict[str, int]]:
+    skip_reasons: dict[str, int] = {}
+    if corrupted["seq_len"] != intact["seq_len"]:
+        skip_reasons["seq_len_mismatch"] = 1
+        return None, skip_reasons
+
+    intact_attns = intact["query_image_attn"]
+    corrupted_attns = corrupted["query_image_attn"]
+    if len(corrupted_attns) != len(intact_attns):
+        skip_reasons["layer_count_mismatch"] = 1
+        return None, skip_reasons
+
+    per_layer = []
+    for li, (Ai, Ac) in enumerate(zip(intact_attns, corrupted_attns)):
+        if tuple(Ai.shape) != tuple(Ac.shape):
+            skip_reasons[f"attention_shape_mismatch_layer_{li}"] = 1
+            return None, skip_reasons
+        Ai = Ai / (Ai.sum(dim=-1, keepdim=True) + 1e-8)
+        Ac = Ac / (Ac.sum(dim=-1, keepdim=True) + 1e-8)
+        per_layer.append(_kl_safe(Ai.float(), Ac.float()).mean().item())
+    return np.asarray(per_layer, dtype=float), skip_reasons
+
+
 @_no_grad()
 def _forward_query_image_attn_from_inputs(wrapper, inputs) -> dict:
     """
@@ -387,6 +410,40 @@ def _forward_attn_from_sample(wrapper, sample) -> dict:
 
 
 @_no_grad()
+def query_image_attention_kl_with_meta_from_sample(
+    wrapper,
+    sample,
+    corrupted_image: Image.Image,
+) -> dict:
+    """
+    Compute query->image attention KL between a clean sample and one explicitly
+    supplied corrupted image. This is the region-targeted counterpart to PF-3's
+    random corruption loop and is used by PF-A.
+    """
+    image, image_meta = prepare_image_for_audit(wrapper, sample.image)
+    clean_sample = replace(sample, image=image)
+    intact = _forward_attn_from_sample(wrapper, clean_sample)
+    spans = intact["spans"]
+    query_span = spans.preferred_query_span()
+
+    corr_image, corr_image_meta = prepare_image_for_audit(wrapper, corrupted_image)
+    corr_sample = replace(clean_sample, image=corr_image)
+    corrupted = _forward_attn_from_sample(wrapper, corr_sample)
+    curve, skip_reasons = _query_image_attn_kl_curve(intact, corrupted)
+
+    return _with_image_preprocess({
+        "curve": curve,
+        "seq_len": intact["seq_len"],
+        "n_total": 1,
+        "n_success": 1 if curve is not None else 0,
+        "n_skipped": 0 if curve is not None else 1,
+        "skip_reasons": skip_reasons,
+        "corrupted_image_preprocess": corr_image_meta,
+        **_span_payload(spans, query_span),
+    }, image_meta)
+
+
+@_no_grad()
 def pf3_curve_with_meta(wrapper, image: Image.Image, question: str,
                         corruption_mode: str = "mask_50pct",
                         num_seeds: int = 3,
@@ -411,18 +468,12 @@ def pf3_curve_with_meta(wrapper, image: Image.Image, question: str,
     for seed in range(num_seeds):
         corr_img = corrupt_image(image, corruption_mode, seed=seed, severity=severity)
         corr = _forward_attn(wrapper, corr_img, question)
-        if corr["seq_len"] != intact_T:        # token 数必须一致
-            skip_reasons["seq_len_mismatch"] = skip_reasons.get("seq_len_mismatch", 0) + 1
+        curve_values, seed_skip = _query_image_attn_kl_curve(intact, corr)
+        if curve_values is None:
+            for reason, count in seed_skip.items():
+                skip_reasons[reason] = skip_reasons.get(reason, 0) + count
             continue
-        corr_attns = corr["query_image_attn"]
-        per_layer = []
-        for li in range(n_layers):
-            Ai = intact_attns[li]
-            Ac = corr_attns[li]
-            Ai = Ai / (Ai.sum(dim=-1, keepdim=True) + 1e-8)
-            Ac = Ac / (Ac.sum(dim=-1, keepdim=True) + 1e-8)
-            per_layer.append(_kl_safe(Ai.float(), Ac.float()).mean().item())
-        per_seed.append(per_layer)
+        per_seed.append(curve_values)
 
     curve = np.asarray(per_seed).mean(axis=0) if per_seed else None
     return _with_image_preprocess({
@@ -461,18 +512,12 @@ def pf3_curve_with_meta_from_sample(wrapper, sample,
         corr_img = corrupt_image(image, corruption_mode, seed=seed, severity=severity)
         corr_sample = replace(sample, image=corr_img)
         corr = _forward_attn_from_sample(wrapper, corr_sample)
-        if corr["seq_len"] != intact_T:
-            skip_reasons["seq_len_mismatch"] = skip_reasons.get("seq_len_mismatch", 0) + 1
+        curve_values, seed_skip = _query_image_attn_kl_curve(intact, corr)
+        if curve_values is None:
+            for reason, count in seed_skip.items():
+                skip_reasons[reason] = skip_reasons.get(reason, 0) + count
             continue
-        corr_attns = corr["query_image_attn"]
-        per_layer = []
-        for li in range(n_layers):
-            Ai = intact_attns[li]
-            Ac = corr_attns[li]
-            Ai = Ai / (Ai.sum(dim=-1, keepdim=True) + 1e-8)
-            Ac = Ac / (Ac.sum(dim=-1, keepdim=True) + 1e-8)
-            per_layer.append(_kl_safe(Ai.float(), Ac.float()).mean().item())
-        per_seed.append(per_layer)
+        per_seed.append(curve_values)
 
     curve = np.asarray(per_seed).mean(axis=0) if per_seed else None
     return _with_image_preprocess({

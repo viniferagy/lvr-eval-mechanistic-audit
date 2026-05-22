@@ -1,0 +1,46 @@
+# Week 2 Task Allocation
+
+## Summary
+
+Week 2 converts the Week 1 foundation into primary metric code. The work is split into small commit-sized batches so each batch can be verified on CPU fixtures and at least one real GPU smoke.
+
+## Batch 1: PF-A Corruption Selectivity
+
+- Status: complete in commit batch 1.
+- Owner: metric/statistics line.
+- Goal: replace the PF-A skeleton with a runnable relevant-vs-irrelevant-random corruption selectivity metric.
+- Implementation target: `pipeline/metrics/v2/pf_a_corruption_selectivity.py`, `pipeline/corruptions.py`, `pipeline/internal_metrics.py`, and `pipeline/analysis.py`.
+- Implementation result: PF-A now applies relevant, irrelevant, and random binary masks to the clean image and computes clean-vs-region-masked query-to-image attention KL through an explicit helper instead of reusing random PF-3 corruption with severity 0.
+- Acceptance evidence:
+  - `./venv/bin/python -m py_compile run_all.py smoke_test.py merge_and_analyze.py pipeline/*.py pipeline/sanity/*.py pipeline/metrics/*.py pipeline/metrics/legacy/*.py pipeline/metrics/v2/*.py pipeline/adapters/*.py pipeline/stats/*.py`
+  - `./venv/bin/python smoke_test.py`
+  - `bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py --config /tmp/lvr_gpu_qwen3b_smoke_pass.yaml --models qwen2_5_vl_3b --only pf_a_corruption_selectivity --device cuda:0 --run-name gpu_week2_pfa_qwen3b_smoke2`
+- GPU artifact: `runs/gpu_week2_pfa_qwen3b_smoke2/metrics/pf_a_corruption_selectivity_qwen2_5_vl_3b.json` reports `selectivity=0.2931104886035124`, `relevant_kl=0.14045639687942135`, `irrelevant_kl=0.43356688548293376`, `random_kl=0.4952622064285808`, `n=1`; `summary_with_ci.json` reports all four scalars with `n=1`; sanity summary status is `pass`.
+
+## Batch 2: BF-Patch Answer Transfer
+
+- Owner: causal patching line.
+- Goal: implement the first native PyTorch hook loop for 5 layers x 3 position buckets on paired samples.
+- Implementation target: `pipeline/metrics/v2/bf_patch_answer_transfer.py`.
+- Acceptance: fake-logit fixture validates answer-transfer math; paired fixture produces 15 grid cells; real SPD-Faith run waits for local data.
+
+## Batch 3: BF-Swap And BF-Conf
+
+- Owner: behavior-faithfulness line.
+- Goal: add controlled latent replacement and calibrated confidence progression modules.
+- Implementation target: new v2 modules under `pipeline/metrics/v2/`.
+- Acceptance: no OOD zero-ablation primary scalar; BF-Conf reports text-only control and gold-token slope where answer tokens are available.
+
+## Batch 4: CF-Stage And PF-B
+
+- Owner: retention/alignment line.
+- Goal: add stagewise early/mid/late aggregation and native/DINO alignment entrypoints.
+- Implementation target: `cf_stage_decay.py`, `pf_b_patch_alignment.py`, and optional DINO dependency gating.
+- Acceptance: CPU schema smoke passes; GPU smoke can run native-only PF-B without DINO if DINO weights are absent.
+
+## Batch 5: Model Go/No-Go Scaffolding
+
+- Owner: adapter line.
+- Goal: document and scaffold Monet / Latent Sketchpad / CrystaL adapter probes without committing to unstable weights.
+- Implementation target: `docs/decisions/M-W2.md` plus lightweight adapter sanity stubs.
+- Acceptance: decision document records public-weight availability, hookability, and whether each model enters the main pool.
