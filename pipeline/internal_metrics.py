@@ -100,15 +100,66 @@ def logit_lens_entropy(wrapper, hidden_state: torch.Tensor) -> np.ndarray:
     return entropy.detach().cpu().numpy()
 
 
+def _to_model_device(tensor: torch.Tensor, wrapper) -> torch.Tensor:
+    try:
+        return tensor.to(wrapper.lm_head.weight.device)
+    except Exception:  # noqa: BLE001
+        return tensor.to(wrapper.device)
+
+
+@_no_grad()
+def bf3_curve_from_inputs_low_memory(wrapper, inputs, query_span) -> np.ndarray:
+    """
+    Compute BF-3 without materializing full output_hidden_states.
+
+    A forward hook stores only the query-position hidden vector from each decoder
+    layer on CPU. This is much cheaper for LVR teacher-forced prompts, where
+    output_hidden_states=True can retain many GiB of [layer, seq, dim] tensors.
+    """
+    last_pos = query_span.end - 1
+    captured: list[torch.Tensor | None] = [None] * wrapper.n_layers
+    handles = []
+
+    def make_hook(idx: int):
+        def hook(_module, _args, output):
+            h = output[0] if isinstance(output, tuple) else output
+            captured[idx] = h[0, last_pos, :].detach().cpu()
+            return output
+        return hook
+
+    for idx, layer in enumerate(wrapper.layers):
+        handles.append(layer.register_forward_hook(make_hook(idx)))
+
+    try:
+        wrapper.model(
+            **inputs,
+            output_hidden_states=False,
+            output_attentions=False,
+            return_dict=True,
+        )
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    ents = []
+    for idx, h_cpu in enumerate(captured):
+        if h_cpu is None:
+            raise RuntimeError(f"BF-3 hook did not capture layer {idx}")
+        h = _to_model_device(h_cpu, wrapper)
+        ents.append(float(logit_lens_entropy(wrapper, h)[0]))
+        del h
+    return np.asarray(ents)
+
+
 @_no_grad()
 def bf3_curve_from_inputs(wrapper, inputs, query_span=None, outputs=None) -> np.ndarray:
     """Compute BF-3 from prebuilt inputs and an adapter-declared query span."""
-    out = outputs
-    if out is None:
-        out = wrapper.model(**inputs, output_hidden_states=True,
-                            output_attentions=False, return_dict=True)
     if query_span is None:
-        _, query_span = _query_span_from_adapter(wrapper, inputs, out)
+        spans, query_span = _query_span_from_adapter(wrapper, inputs, outputs)
+    if outputs is None:
+        return bf3_curve_from_inputs_low_memory(wrapper, inputs, query_span)
+
+    out = outputs
     last_pos = query_span.end - 1
     ents = []
     for li in range(1, len(out.hidden_states)):
@@ -121,11 +172,9 @@ def bf3_curve_from_inputs(wrapper, inputs, query_span=None, outputs=None) -> np.
 def bf3_curve_with_meta(wrapper, image: Image.Image, question: str) -> dict:
     """Single-sample BF-3 curve plus span metadata."""
     inputs = _build_inputs(wrapper, image=image, question=question)
-    out = wrapper.model(**inputs, output_hidden_states=True,
-                        output_attentions=False, return_dict=True)
-    spans, query_span = _query_span_from_adapter(wrapper, inputs, out)
+    spans, query_span = _query_span_from_adapter(wrapper, inputs)
     return {
-        "curve": bf3_curve_from_inputs(wrapper, inputs, query_span, outputs=out),
+        "curve": bf3_curve_from_inputs(wrapper, inputs, query_span),
         **_span_payload(spans, query_span),
     }
 
@@ -134,11 +183,9 @@ def bf3_curve_with_meta(wrapper, image: Image.Image, question: str) -> dict:
 def bf3_curve_with_meta_from_sample(wrapper, sample) -> dict:
     """Single-sample BF-3 using full ProbeSample metadata."""
     inputs = _build_inputs(wrapper, sample=sample)
-    out = wrapper.model(**inputs, output_hidden_states=True,
-                        output_attentions=False, return_dict=True)
-    spans, query_span = _query_span_from_adapter(wrapper, inputs, out)
+    spans, query_span = _query_span_from_adapter(wrapper, inputs)
     return {
-        "curve": bf3_curve_from_inputs(wrapper, inputs, query_span, outputs=out),
+        "curve": bf3_curve_from_inputs(wrapper, inputs, query_span),
         **_span_payload(spans, query_span),
     }
 

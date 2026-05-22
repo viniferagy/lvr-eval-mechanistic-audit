@@ -153,6 +153,7 @@ models:
     name: "LVR-7B"
     path: "./models/LVR-7B"
     arch: "lvr_qwen2_5_vl"
+    lvr_source_path: "../lvr"
     image_pad_token: "<|image_pad|>"
     lvr_start_token: "<|lvr_start|>"
     lvr_token: "<|lvr|>"
@@ -180,7 +181,7 @@ LVR 官方 JSON list 数据：
 ```yaml
 data:
   source_type: "lvr_json"
-  json_path: "./data/meta_data_lvr_sft_stage1.json"
+  json_path: "./data/viscot_363k_lvr_formatted.json"
   image_root: "./data/images"
   max_samples: 50
   skip_missing_images: true
@@ -217,6 +218,8 @@ Important: this fixed-token branch does **not** insert `<|lvr_latent_end|>`. The
 `lvr_latent_end_token` is still configured and its token id is still resolved, because the official model defines it and generation-time traces may encounter it. `allow_lvr_fallback_to_answer_probe=false` 时，如果 LVR teacher-forced 输入中没有产生 `<|lvr|>` span，run 会 fail，而不是悄悄退回 answer-probe control。
 
 By default, LVR teacher-forced mode also requires `sample.lvr_assistant` to contain an official assistant-side `<lvr>` placeholder. `allow_synthetic_lvr_assistant=false` prevents ordinary VQA samples from being silently converted into fake LVR examples. The `lvr_json` loader likewise defaults to `require_lvr_placeholder=true` and skips records whose assistant message has no `<lvr>`.
+
+`launch_sharded.sh` runs a preflight before starting GPU jobs. It fails early if the LVR source checkout is missing or if the probe set is empty. For Visual-CoT/LVR JSON, `image_root` must point to extracted images containing paths such as `viscot/flickr30k/...`; having only `cot_images_tar_split/*` downloaded is not enough.
 
 metric 开关：
 

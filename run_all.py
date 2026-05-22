@@ -293,6 +293,11 @@ def main():
 
     # 数据只加载一次（所有模型共用同一 probe set，保证可比）
     samples = load_probe_set(cfg["data"])
+    if not samples and not cfg["data"].get("allow_empty", False):
+        raise SystemExit(
+            "probe set is empty. Check data.json_path/image_root/require_lvr_placeholder "
+            "or set data.allow_empty=true for debugging only."
+        )
 
     metric_ids = selected_metric_ids(args.only, cfg)
     log.info("selected metrics = %s", " ".join(metric_ids) if metric_ids else "(none)")

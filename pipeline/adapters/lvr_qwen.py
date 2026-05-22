@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
+from pathlib import Path
 
 import torch
 
@@ -34,6 +37,7 @@ class LVRQwenAdapter(QwenVLAdapter):
 
         path = cfg_model["path"]
         config = AutoConfig.from_pretrained(path, trust_remote_code=True)
+        self._ensure_lvr_source_importable(cfg_model)
 
         try:
             from src.model.qwen_lvr_model import QwenWithLVR
@@ -65,6 +69,39 @@ class LVRQwenAdapter(QwenVLAdapter):
         image_pad_id = self._image_pad_id(processor, cfg_model)
         self._ensure_lvr_ids(model, processor, cfg_model)
         return ModelBundle(model=model, processor=processor, image_pad_id=image_pad_id)
+
+    def _ensure_lvr_source_importable(self, cfg_model: dict):
+        """Add the official VincentLeebang/lvr checkout to sys.path if configured."""
+        repo_root = Path(__file__).resolve().parents[2]
+        candidates = [
+            cfg_model.get("lvr_source_path"),
+            os.environ.get("LVR_SOURCE_PATH"),
+            repo_root.parent / "lvr",
+            Path("/home/pengguangyue/workspace/proj/lvr"),
+            Path("/data/pengguangyue/proj/lvr"),
+        ]
+        tried = []
+        for candidate in candidates:
+            if not candidate:
+                continue
+            path = Path(os.path.expandvars(os.path.expanduser(str(candidate))))
+            if not path.is_absolute():
+                path = (Path.cwd() / path).resolve()
+            tried.append(str(path))
+            marker = path / "src" / "model" / "qwen_lvr_model.py"
+            if marker.is_file():
+                path_str = str(path)
+                if path_str not in sys.path:
+                    sys.path.insert(0, path_str)
+                logger.info("LVR source path = %s", path_str)
+                return
+
+        raise RuntimeError(
+            "Official LVR source checkout is required but was not found. "
+            "Set models.lvr_7b.lvr_source_path or LVR_SOURCE_PATH to a directory "
+            "containing src/model/qwen_lvr_model.py. Tried: "
+            + ", ".join(tried)
+        )
 
     def _ensure_lvr_ids(self, model, processor, cfg_model: dict):
         self.lvr_start_token = cfg_model.get("lvr_start_token", "<|lvr_start|>")

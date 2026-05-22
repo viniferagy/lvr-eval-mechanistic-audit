@@ -62,6 +62,40 @@ wait_jobs () {
 
 echo "[sharded] root=$ROOT"
 echo "[sharded] python=$PYTHON_BIN"
+echo "[sharded] preflight..."
+"$PYTHON_BIN" - "$CONFIG" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+import yaml
+
+from pipeline.data import load_probe_set
+
+config_path = sys.argv[1]
+with open(config_path, encoding="utf-8") as f:
+    cfg = yaml.safe_load(f)
+
+lvr_cfg = (cfg.get("models") or {}).get("lvr_7b") or {}
+lvr_source = lvr_cfg.get("lvr_source_path") or os.environ.get("LVR_SOURCE_PATH") or "../lvr"
+lvr_source_path = Path(os.path.expandvars(os.path.expanduser(str(lvr_source))))
+if not lvr_source_path.is_absolute():
+    lvr_source_path = (Path.cwd() / lvr_source_path).resolve()
+lvr_marker = lvr_source_path / "src" / "model" / "qwen_lvr_model.py"
+if not lvr_marker.is_file():
+    raise SystemExit(
+        f"LVR source missing: {lvr_marker}. "
+        "Set models.lvr_7b.lvr_source_path or LVR_SOURCE_PATH."
+    )
+
+samples = load_probe_set(cfg["data"])
+if not samples:
+    raise SystemExit(
+        "probe set is empty. For LVR JSON, check data.json_path, image_root, "
+        "require_lvr_placeholder, and whether Visual-CoT images have been extracted."
+    )
+print(f"[sharded] preflight ok: samples={len(samples)} lvr_source={lvr_source_path}")
+PY
 # 注意：每个进程内部用 cuda:0，因为 CUDA_VISIBLE_DEVICES 已把目标卡映射成 0
 run_job 0 qwen2_5_vl_7b bf1
 run_job 1 qwen2_5_vl_7b cf2

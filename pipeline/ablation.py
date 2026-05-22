@@ -223,15 +223,9 @@ def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
     for s in samples:
         try:
             inputs = wrapper.build_inputs_from_sample(s)
-            out = wrapper.model(
-                **inputs,
-                output_hidden_states=True,
-                output_attentions=False,
-                return_dict=True,
-            )
-            spans = wrapper.adapter.get_spans(wrapper, inputs, out)
+            spans = wrapper.adapter.get_spans(wrapper, inputs)
             query_span = spans.preferred_query_span()
-            curve = IM.bf3_curve_from_inputs(wrapper, inputs, query_span, outputs=out)
+            curve = IM.bf3_curve_from_inputs(wrapper, inputs, query_span)
             meta = IM._span_payload(spans, query_span)  # internal JSON-safe helper
             prepared.append({
                 "id": s.id,
@@ -310,20 +304,13 @@ def run_targeted_ablation_sweep(wrapper, samples: list[ProbeSample],
                     noise_std,
                     token_span=rec["query_span"],
                 ):
-                    out = wrapper.model(
-                        **rec["inputs"],
-                        output_hidden_states=True,
-                        output_attentions=False,
-                        return_dict=True,
+                    bf3_curves.append(
+                        IM.bf3_curve_from_inputs(
+                            wrapper,
+                            rec["inputs"],
+                            rec["query_span"],
+                        )
                     )
-                bf3_curves.append(
-                    IM.bf3_curve_from_inputs(
-                        wrapper,
-                        rec["inputs"],
-                        rec["query_span"],
-                        outputs=out,
-                    )
-                )
             except Exception as exc:  # noqa: BLE001
                 logger.debug("targeted bf1 layer %s bf3 fail: %s", li, exc)
 
