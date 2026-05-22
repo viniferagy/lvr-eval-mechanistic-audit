@@ -19,10 +19,16 @@ Week 2 converts the Week 1 foundation into primary metric code. The work is spli
 
 ## Batch 2: BF-Patch Answer Transfer
 
+- Status: complete in commit batch 2.
 - Owner: causal patching line.
 - Goal: implement the first native PyTorch hook loop for 5 layers x 3 position buckets on paired samples.
 - Implementation target: `pipeline/metrics/v2/bf_patch_answer_transfer.py`.
-- Acceptance: fake-logit fixture validates answer-transfer math; paired fixture produces 15 grid cells; real SPD-Faith run waits for local data.
+- Implementation result: BF-Patch now builds paired clean/counterfactual samples, captures source hidden states at the selected decoder layer and position bucket, patches the target forward pass, and reports source-vs-target answer logit margin shift plus answer-transfer rate. The public schema keeps the default 5 x 3 grid while config may restrict layers/buckets for smoke runs.
+- Acceptance evidence:
+  - `./venv/bin/python -m py_compile run_all.py smoke_test.py merge_and_analyze.py pipeline/*.py pipeline/sanity/*.py pipeline/metrics/*.py pipeline/metrics/legacy/*.py pipeline/metrics/v2/*.py pipeline/adapters/*.py pipeline/stats/*.py`
+  - `./venv/bin/python smoke_test.py`
+  - `bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py --config /tmp/lvr_gpu_bf_patch_qwen3b.yaml --models qwen2_5_vl_3b --only bf_patch_answer_transfer --device cuda:0 --run-name gpu_week2_bf_patch_qwen3b_smoke3`
+- GPU artifact: `runs/gpu_week2_bf_patch_qwen3b_smoke3/metrics/bf_patch_answer_transfer_qwen2_5_vl_3b.json` reports `n_paired=1`, `n_cells=3`, `logit_margin_shift=0.1875`, `answer_transfer_rate=0.0`, with all three smoke cells at `n_success=1` and `n_error=0`; `summary_with_ci.json` reports `answer_transfer` and `logit_margin_shift`; sanity summary status is `pass`.
 
 ## Batch 3: BF-Swap And BF-Conf
 

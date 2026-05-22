@@ -31,7 +31,12 @@ from pipeline.data import load_probe_set
 from pipeline.internal_metrics import corrupt_image, get_post_image_text_span
 from pipeline.metrics import get_metric, list_metrics, list_runnable_metrics, normalize_metric_id, resolve_readout
 from pipeline.metrics.v2.pf_a_corruption_selectivity import run as run_pf_a_metric
-from pipeline.metrics.v2.bf_patch_answer_transfer import answer_transfer_rate, patch_grid
+from pipeline.metrics.v2.bf_patch_answer_transfer import (
+    answer_transfer_rate,
+    patch_grid,
+    patch_one_pair,
+    run as run_bf_patch_metric,
+)
 from pipeline.metrics.lvr_generation_trace import run as run_lvr_trace_metric
 from pipeline.preregistration import build_lock_payload, hash_manifest, load_manifest
 from pipeline.results import make_metric_result
@@ -675,6 +680,100 @@ def test_pf_a_metric_fixture(monkeypatch=None):
     print("  PF-A metric emits selectivity/reductions from explicit masked-image KL -> ok")
 
 
+def test_bf_patch_metric_fixture():
+    print("\n== 10f. BF-Patch hook fixture ==")
+    import torch
+    import torch.nn as nn
+    from pipeline.adapters.spans import AuditSpans, TokenSpan
+    from pipeline.data import ProbeSample
+
+    class TinyTokenizer:
+        vocab = {"red": 1, "blue": 2}
+
+        def __call__(self, text, add_special_tokens=False, return_tensors=None):
+            return {"input_ids": [self.vocab[str(text).strip()]]}
+
+        def decode(self, ids, skip_special_tokens=True):
+            inv = {v: k for k, v in self.vocab.items()}
+            return inv.get(int(ids[0]), str(ids[0]))
+
+    class TinyLayer(nn.Module):
+        def __init__(self, idx):
+            super().__init__()
+            self.idx = idx
+
+        def forward(self, hidden):
+            return hidden + (self.idx + 1) * 0.1
+
+    class TinyModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([TinyLayer(0), TinyLayer(1)])
+            self.device = torch.device("cpu")
+
+        def forward(self, input_ids, **kwargs):
+            hidden = input_ids.float().unsqueeze(-1).repeat(1, 1, 4)
+            for layer in self.layers:
+                hidden = layer(hidden)
+            logits = torch.zeros(hidden.shape[0], hidden.shape[1], 4)
+            logits[..., 1] = hidden[..., 0] * 0.1
+            logits[..., 2] = hidden[..., 0] * 2.0
+            return SimpleNamespace(logits=logits)
+
+    class TinyAdapter:
+        def build_inputs_from_sample(self, wrapper, sample):
+            base = 5.0 if sample.answer == "red" else 1.0
+            ids = torch.tensor([[base, base + 1, base + 2, base + 3]])
+            return {"input_ids": ids}
+
+        def get_spans(self, wrapper, inputs, model_outputs=None):
+            return AuditSpans(
+                image_tokens=TokenSpan(0, 1, "image_tokens"),
+                lvr_placeholder_tokens=TokenSpan(1, 3, "lvr_placeholder_tokens"),
+                answer_probe_pos=3,
+            )
+
+    model = TinyModel()
+    class TinyWrapper:
+        def __init__(self, model):
+            self.model = model
+            self.processor = SimpleNamespace(tokenizer=TinyTokenizer())
+            self.adapter = TinyAdapter()
+            self.layers = model.layers
+            self.n_layers = len(model.layers)
+
+        def build_inputs_from_sample(self, sample):
+            return self.adapter.build_inputs_from_sample(self, sample)
+
+    wrapper = TinyWrapper(model)
+    sample = ProbeSample(
+        id="pair0",
+        image=Image.new("RGB", (8, 8), "white"),
+        question="color?",
+        answer="blue",
+        counterfactual_image=Image.new("RGB", (8, 8), "black"),
+        counterfactual_answer="red",
+        paired_id="pair0",
+    )
+    one = patch_one_pair(wrapper, sample, layer=0, position_bucket="query")
+    assert one["logit_margin_shift"] is not None
+    assert one["patch_length"] == 2
+    assert len(model.layers[0]._forward_hooks) == 0
+    result = run_bf_patch_metric(
+        wrapper,
+        [sample],
+        {"bf_patch": {"layers": [0], "position_buckets": ["image", "query", "latent"]}},
+        "tiny",
+    )
+    assert result["schema"]["status"] == "runnable_v0"
+    assert len(result["cells"]) == 3
+    assert result["n_paired"] == 1
+    assert result["reduction"]["n_cells"] == 3
+    assert len(result["samples"]) == 3
+    assert "answer_transfer" in result["samples"][0]["reduction"]
+    print("  BF-Patch captures source hidden states, patches target, and cleans hooks -> ok")
+
+
 def test_bf1_does_not_cache_gpu_inputs_static():
     print("\n== 11. BF-1 targeted cache policy ==")
     import inspect
@@ -777,6 +876,7 @@ def main():
     test_preregistration_and_bootstrap()
     test_v2_corruptions_and_patch_schema()
     test_pf_a_metric_fixture()
+    test_bf_patch_metric_fixture()
     test_bf1_does_not_cache_gpu_inputs_static()
     test_end_to_end()
     print("\nSMOKE TEST PASSED ✅")
