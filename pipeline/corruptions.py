@@ -13,6 +13,7 @@ from PIL import Image
 class BinaryMask:
     data: np.ndarray
     kind: str
+    oracle_source: str | None = None
 
     @property
     def coverage(self) -> float:
@@ -39,13 +40,15 @@ def _bbox_to_pixels(bbox: Iterable[float], width: int, height: int) -> tuple[int
 def relevant_mask(image: Image.Image, bboxes=None, region_mask=None) -> BinaryMask:
     if region_mask is not None:
         arr = np.asarray(region_mask, dtype=bool)
-        return BinaryMask(arr, "relevant")
+        return BinaryMask(arr, "relevant", "region_mask")
     mask = _empty_mask(image)
+    oracle_source = None
     if bboxes:
         width, height = image.size
         for bbox in bboxes:
             left, top, right, bottom = _bbox_to_pixels(bbox, width, height)
             mask[top:bottom, left:right] = True
+        oracle_source = "bbox"
     if not mask.any():
         # Fallback for datasets without region annotations: use centered area so
         # PF-A remains runnable but clearly records weak oracle quality.
@@ -53,13 +56,14 @@ def relevant_mask(image: Image.Image, bboxes=None, region_mask=None) -> BinaryMa
         y0, y1 = h // 4, (3 * h) // 4
         x0, x1 = w // 4, (3 * w) // 4
         mask[y0:y1, x0:x1] = True
-    return BinaryMask(mask, "relevant")
+        oracle_source = "center_fallback"
+    return BinaryMask(mask, "relevant", oracle_source)
 
 
 def random_mask(image: Image.Image, *, coverage: float = 0.25, seed: int = 0) -> BinaryMask:
     rng = np.random.default_rng(seed)
     mask = rng.random(_empty_mask(image).shape) < float(coverage)
-    return BinaryMask(mask, "random")
+    return BinaryMask(mask, "random", "random")
 
 
 def irrelevant_mask(
@@ -77,7 +81,7 @@ def irrelevant_mask(
     rng.shuffle(candidates)
     for r, c in candidates[:target]:
         mask[r, c] = True
-    return BinaryMask(mask, "irrelevant")
+    return BinaryMask(mask, "irrelevant", f"irrelevant_from_{relevant.oracle_source or relevant.kind}")
 
 
 def apply_mask(image: Image.Image, mask: BinaryMask, *, fill=(0, 0, 0), severity: float = 1.0) -> Image.Image:

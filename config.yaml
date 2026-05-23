@@ -160,6 +160,11 @@ validation:
     min_abs_delta: 1.0e-8
   cf2:
     warn_trend_spearman: 0.2
+  v2:
+    min_samples: 50
+    min_pairs: 50
+    max_error_ratio: 0.2
+    allow_center_fallback: false
 
 output:
   root: "./runs"

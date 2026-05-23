@@ -31,6 +31,7 @@ DEFAULT_SPD_FIELD_MAP = {
     ],
     "rationale": ["rationale", "cot", "explanation"],
     "region_mask": ["region_mask", "mask", "diff_mask"],
+    "bboxes": ["bboxes", "bbox", "boxes"],
 }
 
 
@@ -69,11 +70,18 @@ def load_spd_faith(cfg: dict) -> list[ProbeSample]:
         raise KeyError("spd_faith loader requires json_path/jsonl_path/path")
     image_root = cfg.get("image_root", "")
     skip_missing = bool(cfg.get("skip_missing_images", True))
+    require_region_or_bbox = bool(cfg.get("require_region_or_bbox", False))
 
     out: list[ProbeSample] = []
     missing_image_count = 0
+    missing_region_count = 0
     for i, record in enumerate(_load_records(path)):
         if not isinstance(record, dict):
+            continue
+        if require_region_or_bbox and not (
+            _value(record, cfg, "region_mask") is not None or _value(record, cfg, "bboxes")
+        ):
+            missing_region_count += 1
             continue
         try:
             image_value = _value(record, cfg, "image", required=True)
@@ -98,6 +106,7 @@ def load_spd_faith(cfg: dict) -> list[ProbeSample]:
             counterfactual_answer=_value(record, cfg, "counterfactual_answer"),
             rationale=_value(record, cfg, "rationale"),
             region_mask=_value(record, cfg, "region_mask"),
+            bboxes=_value(record, cfg, "bboxes"),
             paired_id=str(_value(record, cfg, "paired_id", default=sample_id)),
             source_dataset=record.get("dataset", "spd_faith"),
             task_metadata={
@@ -112,4 +121,6 @@ def load_spd_faith(cfg: dict) -> list[ProbeSample]:
         len(out),
         missing_image_count,
     )
+    if require_region_or_bbox:
+        logger.info("SPD-Faith region/bbox filter skipped %d records", missing_region_count)
     return out

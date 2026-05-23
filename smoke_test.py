@@ -18,6 +18,7 @@ import os
 import json
 import tempfile
 from types import SimpleNamespace
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
@@ -50,7 +51,13 @@ from pipeline.degradation import curve_features
 from pipeline.analysis import build_summary_with_ci, run_analysis
 from pipeline import ablation as ABL
 from pipeline import internal_metrics as IM
-from pipeline.sanity import has_failed_checks, run_sanity_suite, save_sanity_reports
+from pipeline.sanity import (
+    has_failed_checks,
+    run_sanity_for_metric_result,
+    run_sanity_suite,
+    save_sanity_reports,
+)
+from tools.validate_spd_range import main as validate_spd_range_main
 
 
 def make_img(seed=0):
@@ -604,6 +611,15 @@ def test_preregistration_and_bootstrap():
         })
     ], seed=1)
     assert rows and rows[0]["scalar"] == "early_to_late_drop"
+    for item in manifest["primary_metrics"]:
+        spec = get_metric(item["metric_id"])
+        schema = spec.require_run().__globals__.get("build_schema", lambda: {})()
+        scalars = set(schema.get("scalars") or [])
+        assert item["primary_scalar"] in scalars, item
+        assert item["status"] == "runnable_v0_validated"
+    trace_cfg = yaml.safe_load(Path("config.trace_v2.yaml").read_text())
+    assert trace_cfg["models"]["lvr_7b"]["arch"] == "lvr_qwen2_5_vl_traced"
+    assert trace_cfg["metrics"]["lvr_generation_trace"]["enabled"] is True
     print("  manifest hash/lock + bootstrap summary_with_ci -> ok")
 
 
@@ -614,6 +630,11 @@ def test_v2_corruptions_and_patch_schema():
     irr = irrelevant_mask(img, rel, seed=0)
     rnd1 = random_mask(img, coverage=0.2, seed=3)
     rnd2 = random_mask(img, coverage=0.2, seed=3)
+    fallback = relevant_mask(img)
+    assert rel.oracle_source == "bbox"
+    assert irr.oracle_source == "irrelevant_from_bbox"
+    assert rnd1.oracle_source == "random"
+    assert fallback.oracle_source == "center_fallback"
     assert int((rel.data & irr.data).sum()) == 0
     assert np.array_equal(rnd1.data, rnd2.data)
     assert np.array_equal(np.asarray(apply_mask(img, rel, severity=0)), np.asarray(img))
@@ -621,8 +642,8 @@ def test_v2_corruptions_and_patch_schema():
     assert len(grid) == 15
     assert grid[0] == {"layer": 0, "position_bucket": "image"}
     rate = answer_transfer_rate([
-        {"patched_answer": "B", "source_answer": "B"},
-        {"patched_answer": "A", "source_answer": "B"},
+        {"answer_transferred": True},
+        {"answer_transferred": False},
     ])
     assert rate == 0.5
     schema_path = os.path.join(tempfile.gettempdir(), "v2_metric_schema_smoke.json")
@@ -693,10 +714,13 @@ def test_bf_patch_metric_fixture():
     from pipeline.data import ProbeSample
 
     class TinyTokenizer:
-        vocab = {"red": 1, "blue": 2}
+        vocab = {"red": 1, "blue": 2, "light": 1, "green": 3}
 
         def __call__(self, text, add_special_tokens=False, return_tensors=None):
-            return {"input_ids": [self.vocab[str(text).strip()]]}
+            return {"input_ids": self.encode(text, add_special_tokens=add_special_tokens)}
+
+        def encode(self, text, add_special_tokens=False):
+            return [self.vocab[part] for part in str(text).strip().split()]
 
         def decode(self, ids, skip_special_tokens=True):
             inv = {v: k for k, v in self.vocab.items()}
@@ -720,9 +744,10 @@ def test_bf_patch_metric_fixture():
             hidden = input_ids.float().unsqueeze(-1).repeat(1, 1, 4)
             for layer in self.layers:
                 hidden = layer(hidden)
-            logits = torch.zeros(hidden.shape[0], hidden.shape[1], 4)
+            logits = torch.zeros(hidden.shape[0], hidden.shape[1], 4, device=hidden.device)
             logits[..., 1] = hidden[..., 0] * 0.1
             logits[..., 2] = hidden[..., 0] * 2.0
+            logits[..., 3] = hidden[..., 0] * 0.5
             return SimpleNamespace(logits=logits)
 
     class TinyAdapter:
@@ -761,8 +786,21 @@ def test_bf_patch_metric_fixture():
         paired_id="pair0",
     )
     one = patch_one_pair(wrapper, sample, layer=0, position_bucket="query")
+    assert one["logprob_margin_shift"] is not None
     assert one["logit_margin_shift"] is not None
     assert one["patch_length"] == 2
+    multi = ProbeSample(
+        id="pair1",
+        image=Image.new("RGB", (8, 8), "white"),
+        question="color?",
+        answer="blue",
+        counterfactual_image=Image.new("RGB", (8, 8), "black"),
+        counterfactual_answer="light green",
+        paired_id="pair1",
+    )
+    multi_one = patch_one_pair(wrapper, multi, layer=0, position_bucket="query")
+    assert multi_one["source_answer_token_ids"] == [1, 3]
+    assert multi_one["patched_source_logprob"] is not None
     assert len(model.layers[0]._forward_hooks) == 0
     result = run_bf_patch_metric(
         wrapper,
@@ -949,8 +987,132 @@ def test_cf_stage_and_pf_b_fixtures():
     print("  CF-Stage stage reducer + PF-B native alignment fixture -> ok")
 
 
+def test_v2_sanity_and_validator_fixtures():
+    print("\n== 10i. v2 sanity dispatch + SPD validator fixtures ==")
+    cfg = {"validation": {"v2": {"min_samples": 1, "min_pairs": 1, "allow_center_fallback": True},
+                          "bf3": {"min_layers": 2}}}
+    payloads = {
+        "lvr_generation_trace": {
+            "model": "fake",
+            "samples": [{
+                "trace_quality": "instrumented_sparse_v0",
+                "missing_modules": [],
+                "n_lvr_mode_steps": 1,
+                "n_hidden_feedback_steps": 1,
+                "lm_head_called": True,
+            }],
+        },
+        "pf_a_corruption_selectivity": {
+            "model": "fake",
+            "reduction": {"selectivity": 1.0, "relevant_kl": 0.1, "irrelevant_kl": 1.1, "random_kl": 0.5, "n": 1},
+            "samples": [{"id": "s", "relevant_irrelevant_overlap": 0, "relevant_oracle_source": "bbox"}],
+        },
+        "pf_b_patch_alignment": {
+            "model": "fake",
+            "config": {"use_dino": False},
+            "reduction": {"native_alignment": 0.8, "relevant_alignment": 0.8, "irrelevant_alignment": 0.5, "random_alignment": 0.6, "n": 1},
+            "samples": [{"id": "s", "relevant_oracle_source": "bbox", "dino": {"available": False}}],
+        },
+        "bf_patch_answer_transfer": {
+            "model": "fake",
+            "n_paired": 1,
+            "cells": [{"n_success": 1, "n_error": 0, "records": [{
+                "source_answer_token_ids": [1, 2],
+                "target_answer_token_ids": [3],
+                "clean_margin": -1.0,
+                "patched_margin": 0.5,
+            }]}],
+        },
+        "bf_swap_latent_replacement": {
+            "model": "fake",
+            "n_paired": 1,
+            "cells": [{"n_success": 1, "n_error": 0, "records": [{
+                "source_answer_token_ids": [1],
+                "target_answer_token_ids": [2],
+                "clean_margin": -0.2,
+                "patched_margin": 0.3,
+            }]}],
+        },
+        "bf_conf_calibrated_progression": {
+            "model": "fake",
+            "reduction": {"gold_logit_slope": 0.1},
+            "samples": [{"id": "s", "curve": [1.0, 0.5], "text_only_control": {"available": True}}],
+        },
+        "cf_stage_decay": {
+            "model": "fake",
+            "reduction": {"late_retention": 0.9},
+            "families": {"mask": {"records": [
+                {"severity": 0.0, "stages": {"early": 1.0, "mid": 1.0, "late": 1.0}},
+                {"severity": 0.8, "stages": {"early": 0.8, "mid": 0.7, "late": 0.6}},
+            ]}},
+        },
+    }
+    for metric_id, payload in payloads.items():
+        reports = run_sanity_for_metric_result(metric_id, payload, cfg)
+        assert reports and not has_failed_checks(reports), metric_id
+    bad_trace = dict(payloads["lvr_generation_trace"])
+    bad_trace["samples"] = [{"trace_quality": "approximate_legacy", "missing_modules": [], "lm_head_called": True}]
+    assert has_failed_checks(run_sanity_for_metric_result("lvr_generation_trace", bad_trace, cfg))
+
+    run_dir = Path(tempfile.mkdtemp(prefix="spd_validator_"))
+    metrics_dir = run_dir / "metrics"
+    sanity_dir = run_dir / "sanity"
+    metrics_dir.mkdir()
+    sanity_dir.mkdir()
+    primary_fixture = {
+        "pf_a_corruption_selectivity": ("selectivity", 1.0),
+        "pf_b_patch_alignment": ("native_alignment", 0.8),
+        "bf_patch_answer_transfer": ("logprob_margin_shift", 0.2),
+        "bf_swap_latent_replacement": ("swap_margin_shift", 0.3),
+        "bf_conf_calibrated_progression": ("gold_logit_slope", 0.1),
+        "cf_stage_decay": ("late_retention", 0.9),
+    }
+    model_fixture = ("qwen2_5_vl_3b", "qwen2_5_vl_7b", "lvr_7b")
+    for model in model_fixture:
+        for metric_id, scalar in {
+            "pf_a_corruption_selectivity": ("selectivity", 1.0),
+            "pf_b_patch_alignment": ("native_alignment", 0.8),
+            "bf_patch_answer_transfer": ("logprob_margin_shift", 0.2),
+            "bf_swap_latent_replacement": ("swap_margin_shift", 0.3),
+            "bf_conf_calibrated_progression": ("gold_logit_slope", 0.1),
+            "cf_stage_decay": ("late_retention", 0.9),
+        }.items():
+            payload = {"reduction": {scalar[0]: scalar[1]}}
+            if metric_id in {"bf_patch_answer_transfer", "bf_swap_latent_replacement"}:
+                payload.update({"n_paired": 1, "cells": [{"n_success": 1, "n_error": 0}]})
+            (metrics_dir / f"{metric_id}__{model}.json").write_text(json.dumps({
+                "metric_id": metric_id,
+                "model": model,
+                "payload": payload,
+            }))
+    (run_dir / "summary_with_ci.json").write_text(json.dumps([
+        {"metric_id": metric_id, "model": model, "scalar": scalar, "n": 1}
+        for metric_id, (scalar, _value) in primary_fixture.items()
+        for model in model_fixture
+    ]))
+    (sanity_dir / "summary_sanity.json").write_text(json.dumps({"overall_status": "pass"}))
+    import sys
+
+    old_argv = sys.argv
+    try:
+        sys.argv = ["validate_spd_range.py", str(run_dir), "--min-pairs", "1"]
+        validate_spd_range_main()
+        low_dir = Path(tempfile.mkdtemp(prefix="spd_validator_low_"))
+        (low_dir / "metrics").mkdir()
+        (low_dir / "summary_with_ci.json").write_text("[]")
+        sys.argv = ["validate_spd_range.py", str(low_dir), "--min-pairs", "1"]
+        try:
+            validate_spd_range_main()
+            raise AssertionError("validator should reject missing metrics")
+        except SystemExit as exc:
+            assert "FAIL:" in str(exc)
+    finally:
+        sys.argv = old_argv
+    print("  v2 sanity dispatch and range validator accept/reject fixtures -> ok")
+
+
 def test_adapter_probe_catalog():
-    print("\n== 10i. adapter probe catalog ==")
+    print("\n== 10j. adapter probe catalog ==")
     probes = list_adapter_probes()
     summary = validate_adapter_probes(probes)
     assert summary["all_complete"] is True
@@ -1065,6 +1227,7 @@ def main():
     test_bf_patch_metric_fixture()
     test_bf_swap_and_conf_fixtures()
     test_cf_stage_and_pf_b_fixtures()
+    test_v2_sanity_and_validator_fixtures()
     test_adapter_probe_catalog()
     test_bf1_does_not_cache_gpu_inputs_static()
     test_end_to_end()

@@ -33,9 +33,9 @@ def _mean(values: list[float]) -> float | None:
 def _cell_summary(cell: dict, records: list[dict]) -> dict:
     valid = [r for r in records if r.get("error") is None]
     shifts = [
-        float(r["logit_margin_shift"])
+        float(r["logprob_margin_shift"])
         for r in valid
-        if r.get("logit_margin_shift") is not None
+        if r.get("logprob_margin_shift") is not None
     ]
     transfers = [
         float(bool(r.get("answer_transferred")))
@@ -65,7 +65,7 @@ def _flatten_sample_records(cells: list[dict]) -> list[dict]:
                 "layer": cell.get("layer"),
                 "position_bucket": cell.get("position_bucket"),
                 "reduction": {
-                    "swap_margin_shift": record.get("logit_margin_shift"),
+                    "swap_margin_shift": record.get("logprob_margin_shift"),
                     "swap_answer_transfer": float(bool(record.get("answer_transferred"))),
                 },
             })

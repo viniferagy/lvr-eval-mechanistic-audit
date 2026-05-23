@@ -12,6 +12,15 @@ from .cf2 import check_cf2_result
 from .common import FAIL, WARN
 from .pf3 import check_pf3_curve
 from .spans import check_span_metadata
+from .v2 import (
+    check_bf_conf_result,
+    check_bf_patch_result,
+    check_bf_swap_result,
+    check_cf_stage_result,
+    check_pf_a_result,
+    check_pf_b_result,
+    check_trace_v2_result,
+)
 
 
 def run_sanity_suite(ablation_results: dict[str, dict],
@@ -82,6 +91,20 @@ def run_sanity_for_metric_result(metric_id: str, result: dict,
                 cfg, source="standalone"
             ))
         return reports
+    if metric_id == "lvr_generation_trace":
+        return [check_trace_v2_result(result, cfg)]
+    if metric_id == "pf_a_corruption_selectivity":
+        return [check_pf_a_result(result, cfg)]
+    if metric_id == "pf_b_patch_alignment":
+        return [check_pf_b_result(result, cfg)]
+    if metric_id == "bf_patch_answer_transfer":
+        return [check_bf_patch_result(result, cfg)]
+    if metric_id == "bf_swap_latent_replacement":
+        return [check_bf_swap_result(result, cfg)]
+    if metric_id == "bf_conf_calibrated_progression":
+        return [check_bf_conf_result(result, cfg)]
+    if metric_id == "cf_stage_decay":
+        return [check_cf_stage_result(result, cfg)]
     return []
 
 

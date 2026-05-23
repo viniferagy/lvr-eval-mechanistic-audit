@@ -72,6 +72,9 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
             "relevant_coverage": rel.coverage,
             "irrelevant_coverage": irr.coverage,
             "random_coverage": rnd.coverage,
+            "relevant_oracle_source": rel.oracle_source,
+            "irrelevant_oracle_source": irr.oracle_source,
+            "random_oracle_source": rnd.oracle_source,
         }
         try:
             rel_meta = _attention_alignment(wrapper, sample, rel, cfg)

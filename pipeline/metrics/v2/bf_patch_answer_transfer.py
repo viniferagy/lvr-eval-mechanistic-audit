@@ -1,7 +1,7 @@
 """BF-Patch answer transfer via paired hidden-state patching."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from typing import Any
 
@@ -35,17 +35,17 @@ def patch_grid(layers=None, position_buckets=None) -> list[dict]:
 
 
 def answer_transfer_rate(records: list[dict]) -> float | None:
-    valid = [r for r in records if r.get("patched_answer") is not None and r.get("source_answer") is not None]
+    valid = [r for r in records if r.get("answer_transferred") is not None]
     if not valid:
         return None
-    return sum(1 for r in valid if r["patched_answer"] == r["source_answer"]) / len(valid)
+    return sum(1 for r in valid if bool(r["answer_transferred"])) / len(valid)
 
 
 def build_schema() -> dict:
     return {
         "metric_id": METRIC_ID,
         "grid": patch_grid(),
-        "scalars": ["logit_margin_shift", "answer_transfer_rate", "n_paired"],
+        "scalars": ["logprob_margin_shift", "answer_transfer_rate", "n_paired"],
         "status": "runnable_v0",
     }
 
@@ -91,6 +91,25 @@ def _answer_token_id(wrapper, answer: Any) -> int | None:
     return int(ids[0])
 
 
+def _answer_token_ids(wrapper, answer: Any) -> list[int]:
+    if answer is None:
+        return []
+    text = str(answer).strip()
+    if not text:
+        return []
+    tokenizer = getattr(wrapper.processor, "tokenizer", wrapper.processor)
+    if hasattr(tokenizer, "encode"):
+        ids = tokenizer.encode(text, add_special_tokens=False)
+    else:
+        encoded = tokenizer(text, add_special_tokens=False, return_tensors=None)
+        ids = encoded.get("input_ids") if isinstance(encoded, dict) else encoded
+    if ids and isinstance(ids[0], list):
+        ids = ids[0]
+    if ids and ids.__class__.__name__ == "Encoding":
+        ids = getattr(ids, "ids", [])
+    return [int(token_id) for token_id in (ids or [])]
+
+
 def _token_logit(logits, token_id: int | None) -> float | None:
     if token_id is None:
         return None
@@ -113,6 +132,72 @@ def _argmax_answer(logits, wrapper, candidate_ids: list[int | None]) -> tuple[st
     else:
         token_id = int(logits.detach().float().argmax().item())
     return _decode_token(wrapper, token_id), token_id
+
+
+def _append_answer_tokens(inputs, answer_token_ids: list[int]):
+    if torch is None or not answer_token_ids:
+        return inputs
+    out = dict(inputs)
+    input_ids = out.get("input_ids")
+    if input_ids is None:
+        return inputs
+    answer = torch.tensor([answer_token_ids], dtype=input_ids.dtype, device=input_ids.device)
+    out["input_ids"] = torch.cat([input_ids, answer], dim=1)
+    attention_mask = out.get("attention_mask")
+    if attention_mask is not None:
+        out["attention_mask"] = torch.cat([attention_mask, torch.ones_like(answer)], dim=1)
+    return out
+
+
+def _sequence_logprob(wrapper, inputs, spans, answer_token_ids: list[int], *,
+                      patch_layer: int | None = None,
+                      patch_slice: slice | None = None,
+                      replacement=None) -> float | None:
+    if torch is None or not answer_token_ids:
+        return None
+    scored_inputs = _append_answer_tokens(inputs, answer_token_ids)
+    prompt_len = int(inputs["input_ids"].shape[1])
+    context = (
+        _patch_layer_hidden(wrapper, patch_layer, patch_slice, replacement)
+        if patch_layer is not None and patch_slice is not None and replacement is not None
+        else nullcontext()
+    )
+    with context:
+        output = _model_forward(wrapper, scored_inputs)
+    logits = output.logits[0].float()
+    total = 0.0
+    for idx, token_id in enumerate(answer_token_ids):
+        pos = prompt_len + idx - 1
+        if pos < 0 or pos >= logits.shape[0]:
+            return None
+        total += float(torch.log_softmax(logits[pos], dim=-1)[int(token_id)].detach().cpu().item())
+    return total
+
+
+def _candidate_logprobs(wrapper, inputs, spans, source_ids: list[int], target_ids: list[int], *,
+                        patch_layer: int | None = None,
+                        patch_slice: slice | None = None,
+                        replacement=None) -> dict:
+    source_lp = _sequence_logprob(
+        wrapper,
+        inputs,
+        spans,
+        source_ids,
+        patch_layer=patch_layer,
+        patch_slice=patch_slice,
+        replacement=replacement,
+    )
+    target_lp = _sequence_logprob(
+        wrapper,
+        inputs,
+        spans,
+        target_ids,
+        patch_layer=patch_layer,
+        patch_slice=patch_slice,
+        replacement=replacement,
+    )
+    margin = source_lp - target_lp if source_lp is not None and target_lp is not None else None
+    return {"source_logprob": source_lp, "target_logprob": target_lp, "margin": margin}
 
 
 def _span_for_bucket(spans, bucket: str) -> TokenSpan:
@@ -226,6 +311,8 @@ def patch_one_pair(wrapper, sample, *, layer: int, position_bucket: str) -> dict
 
     source_token_id = _answer_token_id(wrapper, source.answer)
     target_token_id = _answer_token_id(wrapper, target.answer)
+    source_answer_token_ids = _answer_token_ids(wrapper, source.answer)
+    target_answer_token_ids = _answer_token_ids(wrapper, target.answer)
 
     with _capture_layer_hidden(wrapper, layer, source_slice) as captured:
         _model_forward(wrapper, source_inputs)
@@ -233,20 +320,43 @@ def patch_one_pair(wrapper, sample, *, layer: int, position_bucket: str) -> dict
     if replacement is None:
         raise RuntimeError(f"BF-Patch did not capture source hidden state at layer {layer}")
 
+    clean_scores = _candidate_logprobs(
+        wrapper,
+        target_inputs,
+        target_spans,
+        source_answer_token_ids,
+        target_answer_token_ids,
+    )
     target_clean = _model_forward(wrapper, target_inputs)
     clean_logits = _answer_probe_logits(target_clean, target_spans)
-    clean_margin = _answer_margin(clean_logits, source_token_id, target_token_id)
-
+    clean_token_margin = _answer_margin(clean_logits, source_token_id, target_token_id)
+    patched_scores = _candidate_logprobs(
+        wrapper,
+        target_inputs,
+        target_spans,
+        source_answer_token_ids,
+        target_answer_token_ids,
+        patch_layer=layer,
+        patch_slice=target_slice,
+        replacement=replacement,
+    )
     with _patch_layer_hidden(wrapper, layer, target_slice, replacement):
         patched_out = _model_forward(wrapper, target_inputs)
     patched_logits = _answer_probe_logits(patched_out, target_spans)
-    patched_margin = _answer_margin(patched_logits, source_token_id, target_token_id)
+    clean_margin = clean_scores["margin"]
+    patched_margin = patched_scores["margin"]
     patched_answer, patched_token_id = _argmax_answer(
         patched_logits,
         wrapper,
         [source_token_id, target_token_id],
     )
-    answer_transferred = patched_answer == str(source.answer)
+    diagnostic_token_margin = _answer_margin(patched_logits, source_token_id, target_token_id)
+    answer_transferred = patched_scores["margin"] is not None and patched_scores["margin"] > 0
+    logprob_margin_shift = (
+        patched_scores["margin"] - clean_scores["margin"]
+        if patched_scores["margin"] is not None and clean_scores["margin"] is not None
+        else None
+    )
 
     return {
         "id": sample.id,
@@ -260,13 +370,22 @@ def patch_one_pair(wrapper, sample, *, layer: int, position_bucket: str) -> dict
         "patched_token_id": patched_token_id,
         "source_token_id": source_token_id,
         "target_token_id": target_token_id,
+        "source_answer_token_ids": source_answer_token_ids,
+        "target_answer_token_ids": target_answer_token_ids,
+        "clean_source_logprob": clean_scores["source_logprob"],
+        "clean_target_logprob": clean_scores["target_logprob"],
+        "patched_source_logprob": patched_scores["source_logprob"],
+        "patched_target_logprob": patched_scores["target_logprob"],
         "clean_margin": clean_margin,
         "patched_margin": patched_margin,
+        "logprob_margin_shift": logprob_margin_shift,
         "logit_margin_shift": (
-            patched_margin - clean_margin
-            if patched_margin is not None and clean_margin is not None
+            diagnostic_token_margin - clean_token_margin
+            if diagnostic_token_margin is not None and clean_token_margin is not None
             else None
         ),
+        "clean_token_margin": clean_token_margin,
+        "diagnostic_token_margin": diagnostic_token_margin,
         "patch_length": patch_length,
         "source_span": [source_span.start, source_span.end],
         "target_span": [target_span.start, target_span.end],
@@ -275,13 +394,18 @@ def patch_one_pair(wrapper, sample, *, layer: int, position_bucket: str) -> dict
 
 def _cell_summary(cell: dict, records: list[dict]) -> dict:
     valid_shifts = [
-        float(r["logit_margin_shift"])
+        float(r["logprob_margin_shift"])
         for r in records
-        if r.get("logit_margin_shift") is not None
+        if r.get("logprob_margin_shift") is not None
     ]
     return {
         **cell,
-        "logit_margin_shift": float(np.mean(valid_shifts)) if valid_shifts else None,
+        "logprob_margin_shift": float(np.mean(valid_shifts)) if valid_shifts else None,
+        "logit_margin_shift": float(np.mean([
+            float(r["logit_margin_shift"])
+            for r in records
+            if r.get("logit_margin_shift") is not None
+        ])) if any(r.get("logit_margin_shift") is not None for r in records) else None,
         "answer_transfer_rate": answer_transfer_rate(records),
         "n_paired": len(records),
         "n_success": sum(1 for r in records if r.get("error") is None),
@@ -291,7 +415,7 @@ def _cell_summary(cell: dict, records: list[dict]) -> dict:
 
 
 def reduce_cells(cells: list[dict]) -> dict | None:
-    shifts = [float(c["logit_margin_shift"]) for c in cells if c.get("logit_margin_shift") is not None]
+    shifts = [float(c["logprob_margin_shift"]) for c in cells if c.get("logprob_margin_shift") is not None]
     transfers = [
         float(c["answer_transfer_rate"])
         for c in cells
@@ -300,7 +424,10 @@ def reduce_cells(cells: list[dict]) -> dict | None:
     if not shifts and not transfers:
         return None
     return {
-        "logit_margin_shift": float(np.mean(shifts)) if shifts else None,
+        "logprob_margin_shift": float(np.mean(shifts)) if shifts else None,
+        "logit_margin_shift": float(np.mean([
+            float(c["logit_margin_shift"]) for c in cells if c.get("logit_margin_shift") is not None
+        ])) if any(c.get("logit_margin_shift") is not None for c in cells) else None,
         "answer_transfer_rate": float(np.mean(transfers)) if transfers else None,
         "n_paired": int(max((c.get("n_paired", 0) for c in cells), default=0)),
         "n_cells": len(cells),
@@ -320,6 +447,7 @@ def _flatten_sample_records(cells: list[dict]) -> list[dict]:
                 "layer": cell.get("layer"),
                 "position_bucket": cell.get("position_bucket"),
                 "reduction": {
+                    "logprob_margin_shift": record.get("logprob_margin_shift"),
                     "logit_margin_shift": record.get("logit_margin_shift"),
                     "answer_transfer": (
                         float(bool(transferred)) if transferred is not None else None
@@ -361,6 +489,7 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
                     "source_answer": str(sample.counterfactual_answer),
                     "target_answer": str(sample.answer),
                     "patched_answer": None,
+                    "logprob_margin_shift": None,
                     "logit_margin_shift": None,
                     "error": repr(exc),
                 })

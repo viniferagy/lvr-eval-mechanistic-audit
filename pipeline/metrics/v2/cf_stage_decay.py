@@ -129,6 +129,7 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
     for family, severities in families.items():
         sev_values = sorted({0.0, *[float(v) for v in severities]})
         records = []
+        sample_stage_series: dict[str, list[dict]] = {}
         for severity in sev_values:
             stage_values = []
             errors = []
@@ -139,6 +140,10 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
                         errors.append("empty_curve")
                         continue
                     stages = stage_reduce(meta["curve"])
+                    sample_stage_series.setdefault(str(sample.id), []).append({
+                        "severity": severity,
+                        "stages": stages,
+                    })
                     stage_values.append(stages)
                     sample_rows.append({
                         "id": sample.id,
@@ -168,6 +173,23 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
             "records": records,
             "reduction": _family_reduction(records),
         }
+        for sample_id, series in sample_stage_series.items():
+            ordered = sorted(series, key=lambda item: float(item["severity"]))
+            clean = next((item for item in ordered if float(item["severity"]) == 0.0), None)
+            final = ordered[-1] if ordered else None
+            clean_late = (clean or {}).get("stages", {}).get("late")
+            final_late = (final or {}).get("stages", {}).get("late")
+            late_retention = (
+                float(final_late) / (abs(float(clean_late)) + 1e-9)
+                if clean_late is not None and final_late is not None
+                else None
+            )
+            sample_rows.append({
+                "id": sample_id,
+                "family": family,
+                "kind": "sample_retention",
+                "reduction": {"late_retention": late_retention},
+            })
 
     reductions = [fam["reduction"] for fam in family_results.values()]
     aggregate = {}

@@ -46,7 +46,21 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
             })
         except Exception as exc:  # noqa: BLE001
             out.append({"id": s.id, "error": repr(exc)})
-    return {"model": model_tag, "samples": out}
+    valid = [row for row in out if row.get("error") is None]
+    n_instrumented = sum(1 for row in valid if row.get("trace_quality") == "instrumented_sparse_v0")
+    n_with_lvr_mode = sum(1 for row in valid if int(row.get("n_lvr_mode_steps") or 0) >= 1)
+    n_with_hidden_feedback = sum(1 for row in valid if int(row.get("n_hidden_feedback_steps") or 0) >= 1)
+    return {
+        "model": model_tag,
+        "samples": out,
+        "reduction": {
+            "n_samples": len(out),
+            "n_instrumented": n_instrumented,
+            "n_with_lvr_mode": n_with_lvr_mode,
+            "n_with_hidden_feedback": n_with_hidden_feedback,
+            "instrumented_rate": n_instrumented / max(len(out), 1),
+        },
+    }
 
 
 SPEC = MetricSpec(
