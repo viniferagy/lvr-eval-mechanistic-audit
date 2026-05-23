@@ -63,6 +63,7 @@ from pipeline.sanity import (
 )
 from tools.validate_spd_range import main as validate_spd_range_main
 from tools.validate_w3_latent import main as validate_w3_latent_main
+from tools.validate_w4_stepsweep import main as validate_w4_stepsweep_main
 
 
 def make_img(seed=0):
@@ -718,8 +719,13 @@ def test_preregistration_and_bootstrap():
         scalars = set(schema.get("scalars") or [])
         assert item["primary_scalar"] in scalars, item
         assert item["status"] == "runnable_v0_validated"
-    exp = {item["metric_id"]: item for item in manifest.get("experimental_metrics", [])}
-    assert exp["lvr_latent_patch_answer_transfer"]["primary_scalar"] == "latent_answer_transfer_rate"
+    exp = manifest.get("experimental_metrics", [])
+    latent_scalars = {
+        item["primary_scalar"]
+        for item in exp
+        if item["metric_id"] == "lvr_latent_patch_answer_transfer"
+    }
+    assert {"latent_answer_transfer_rate", "best_step_transfer_rate"} <= latent_scalars
     assert get_metric("latent_patch").metric_id == "lvr_latent_patch_answer_transfer"
     trace_cfg = yaml.safe_load(Path("config.trace_v2.yaml").read_text())
     assert trace_cfg["models"]["lvr_7b"]["arch"] == "lvr_qwen2_5_vl_traced"
@@ -1315,6 +1321,128 @@ def test_w3_latent_sanity_and_validator_fixtures():
     print("  W3 latent sanity and validator accept/reject fixtures -> ok")
 
 
+def test_w4_latent_step_sweep_fixtures():
+    print("\n== 10i3. W4 latent step sweep sanity + validator fixtures ==")
+    records = [
+        {
+            "answer_transferred": True,
+            "latent_margin_shift": 0.3,
+            "n_patch_applied": 2,
+            "n_lvr_mode_steps": 2,
+            "n_captured_latent_states": 2,
+            "step_results": [
+                {
+                    "step_index": 0,
+                    "answer_transferred": False,
+                    "latent_margin_shift": -0.1,
+                    "n_patch_applied": 1,
+                    "trace_quality": "instrumented_sparse_v0",
+                    "missing_modules": [],
+                },
+                {
+                    "step_index": 1,
+                    "answer_transferred": True,
+                    "latent_margin_shift": 0.3,
+                    "n_patch_applied": 1,
+                    "trace_quality": "instrumented_sparse_v0",
+                    "missing_modules": [],
+                },
+            ],
+            "reduction": {
+                "latent_answer_transfer_rate": 1.0,
+                "latent_margin_shift": 0.3,
+                "best_step_transfer_rate": 1.0,
+                "best_step_index": 1,
+                "step_transfer_auc": 0.5,
+                "last_step_transfer_rate": 1.0,
+                "n_steps_evaluated": 2,
+            },
+        }
+    ]
+    reduction = reduce_w3_latent_records(records, 1)
+    assert reduction["best_step_transfer_rate"] == 1.0
+    assert reduction["best_step_index"] == 1
+    assert reduction["n_steps_evaluated"] == 2
+    assert abs(reduction["step_transfer_auc"] - 0.5) < 1e-9
+
+    payload = {
+        "model": "lvr_7b",
+        "n_paired": 1,
+        "reduction": {
+            **reduction,
+            "n_success": 1,
+            "n_error": 0,
+            "n_patch_applied": 1,
+            "n_with_lvr_mode": 1,
+            "n_with_captured_state": 1,
+        },
+        "samples": [{
+            "id": "p0",
+            "paired_id": "p0",
+            "trace_quality": "instrumented_sparse_v0",
+            "source_trace_quality": "instrumented_sparse_v0",
+            "missing_modules": [],
+            "trace_v2_error": None,
+            "clean_answer": "original",
+            "patched_answer": "modified",
+            "captured_state_shapes": [[1, 4], [1, 4]],
+            "patched_captured_state_shapes": [[1, 4]],
+            "step_results": records[0]["step_results"],
+            "reduction": records[0]["reduction"],
+        }],
+    }
+    cfg = {"validation": {"w3": {"min_pairs": 1}, "w4": {"min_pairs": 1, "min_steps": 2}}}
+    reports = run_sanity_for_metric_result("lvr_latent_patch_answer_transfer", payload, cfg)
+    assert reports and not has_failed_checks(reports)
+    bad = dict(payload)
+    bad["reduction"] = {**payload["reduction"], "n_steps_evaluated": 1, "per_step": payload["reduction"]["per_step"][:1]}
+    assert has_failed_checks(run_sanity_for_metric_result("lvr_latent_patch_answer_transfer", bad, cfg))
+
+    run_dir = Path(tempfile.mkdtemp(prefix="w4_stepsweep_validator_"))
+    metrics_dir = run_dir / "metrics"
+    sanity_dir = run_dir / "sanity"
+    metrics_dir.mkdir()
+    sanity_dir.mkdir()
+    (run_dir / "prereg.lock.json").write_text(json.dumps({"manifest_version": "fixture"}))
+    (metrics_dir / "lvr_latent_patch_answer_transfer_lvr_7b.json").write_text(json.dumps({
+        "metric_id": "lvr_latent_patch_answer_transfer",
+        "model": "lvr_7b",
+        "payload": payload,
+    }))
+    (run_dir / "summary_with_ci.json").write_text(json.dumps([
+        {
+            "metric_id": "lvr_latent_patch_answer_transfer",
+            "model": "lvr_7b",
+            "scalar": "best_step_transfer_rate",
+            "n": 1,
+        },
+        {
+            "metric_id": "lvr_latent_patch_answer_transfer",
+            "model": "lvr_7b",
+            "scalar": "step_transfer_auc",
+            "n": 1,
+        },
+    ]))
+    (sanity_dir / "summary_sanity.json").write_text(json.dumps({"overall_status": "pass"}))
+    import sys
+
+    old_argv = sys.argv
+    try:
+        sys.argv = ["validate_w4_stepsweep.py", str(run_dir), "--min-pairs", "1", "--min-steps", "2"]
+        validate_w4_stepsweep_main()
+        low_dir = Path(tempfile.mkdtemp(prefix="w4_stepsweep_validator_low_"))
+        (low_dir / "metrics").mkdir()
+        sys.argv = ["validate_w4_stepsweep.py", str(low_dir), "--min-pairs", "1", "--min-steps", "2"]
+        try:
+            validate_w4_stepsweep_main()
+            raise AssertionError("W4 validator should reject missing metric")
+        except SystemExit as exc:
+            assert "FAIL:" in str(exc)
+    finally:
+        sys.argv = old_argv
+    print("  W4 latent step sweep sanity and validator accept/reject fixtures -> ok")
+
+
 def test_adapter_probe_catalog():
     print("\n== 10j. adapter probe catalog ==")
     probes = list_adapter_probes()
@@ -1435,6 +1563,7 @@ def main():
     test_cf_stage_and_pf_b_fixtures()
     test_v2_sanity_and_validator_fixtures()
     test_w3_latent_sanity_and_validator_fixtures()
+    test_w4_latent_step_sweep_fixtures()
     test_adapter_probe_catalog()
     test_bf1_does_not_cache_gpu_inputs_static()
     test_end_to_end()

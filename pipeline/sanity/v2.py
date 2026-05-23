@@ -32,6 +32,18 @@ def _w3_max_error_ratio(cfg: dict | None) -> float:
     return float(_w3_cfg(cfg).get("max_error_ratio", 0.2))
 
 
+def _w4_cfg(cfg: dict | None) -> dict:
+    return (((cfg or {}).get("validation") or {}).get("w4") or {})
+
+
+def _w4_min_pairs(cfg: dict | None) -> int:
+    return int(_w4_cfg(cfg).get("min_pairs", _w3_min_pairs(cfg)))
+
+
+def _w4_min_steps(cfg: dict | None) -> int:
+    return int(_w4_cfg(cfg).get("min_steps", 2))
+
+
 def _allow_center_fallback(cfg: dict | None) -> bool:
     return bool(_v2_cfg(cfg).get("allow_center_fallback", False))
 
@@ -237,7 +249,7 @@ def check_lvr_latent_patch_result(payload: dict, cfg: dict | None = None) -> dic
     checks = _finite_reduction_checks(payload, ["latent_answer_transfer_rate"])
     reduction = payload.get("reduction") or {}
     n_paired = int(payload.get("n_paired") or reduction.get("n_paired") or 0)
-    min_pairs = _w3_min_pairs(cfg)
+    min_pairs = _w4_min_pairs(cfg) if _w4_cfg(cfg) else _w3_min_pairs(cfg)
     checks.append(make_check(
         "min_pairs",
         PASS if n_paired >= min_pairs else FAIL,
@@ -301,4 +313,45 @@ def check_lvr_latent_patch_result(payload: dict, cfg: dict | None = None) -> dic
                              answer_records=answer_records, min_pairs=min_pairs))
     checks.append(make_check("captured_shape_match", PASS if shape_records >= min_pairs else FAIL,
                              shape_records=shape_records, min_pairs=min_pairs))
+    min_steps = _w4_min_steps(cfg)
+    n_steps = int(reduction.get("n_steps_evaluated") or 0)
+    if n_steps >= min_steps or _w4_cfg(cfg):
+        checks.append(make_check(
+            "step_sweep_min_steps",
+            PASS if n_steps >= min_steps else FAIL,
+            n_steps_evaluated=n_steps,
+            min_steps=min_steps,
+        ))
+        for key in ("best_step_transfer_rate", "step_transfer_auc", "last_step_transfer_rate"):
+            checks.append(make_check(
+                f"finite_{key}",
+                PASS if is_finite_scalar(reduction.get(key)) else FAIL,
+                key=key,
+                value=reduction.get(key),
+            ))
+        checks.append(make_check(
+            "best_step_index_present",
+            PASS if reduction.get("best_step_index") is not None else FAIL,
+            best_step_index=reduction.get("best_step_index"),
+        ))
+        per_step = reduction.get("per_step") or []
+        checks.append(make_check(
+            "per_step_records_present",
+            PASS if len(per_step) >= min_steps else FAIL,
+            n_per_step=len(per_step),
+            min_steps=min_steps,
+        ))
+        step_result_records = 0
+        for record in payload.get("samples") or []:
+            if record.get("error") is not None:
+                continue
+            step_results = record.get("step_results") or []
+            if len(step_results) >= min_steps:
+                step_result_records += 1
+        checks.append(make_check(
+            "sample_step_results_present",
+            PASS if step_result_records >= min_pairs else FAIL,
+            step_result_records=step_result_records,
+            min_pairs=min_pairs,
+        ))
     return make_report("lvr_latent_patch_answer_transfer", payload.get("model", "unknown"), checks, "w3")

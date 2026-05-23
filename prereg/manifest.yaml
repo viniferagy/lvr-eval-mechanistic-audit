@@ -44,6 +44,12 @@ experimental_metrics:
     version: "0.3-w3-latent-gate"
     status: "runnable_w3_gate"
     scope: "true_lvr_generation_time_hidden_feedback_intervention"
+  - metric_id: "lvr_latent_patch_answer_transfer"
+    family: "BF"
+    primary_scalar: "best_step_transfer_rate"
+    version: "0.4-w4-step-localization"
+    status: "runnable_w4_stepsweep"
+    scope: "true_lvr_generation_time_hidden_feedback_step_localization"
 statistics:
   bootstrap:
     ci: 0.95

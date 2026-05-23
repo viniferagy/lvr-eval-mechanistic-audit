@@ -7,13 +7,13 @@
 This repository is currently at:
 
 ```text
-Engineering stage: W2-final-gate / runnable-v0 validation passed
-Scientific stage: range-level validation scaffold, not paper-grade causal evidence
+Engineering stage: W4 latent step-localization gate passed
+Scientific stage: true LVR hidden-feedback gate + localization scaffold, not paper-grade causal evidence
 ```
 
-The W2 gate demonstrates that the infrastructure can run end to end on real SPD-Faith paired data and real GPU models. It does **not** yet justify strong claims about inference-time LVR latent-state causality. In particular, the SPD range run treats `lvr_7b` as an LVR-weight model under query-span paired intervention, not as a true continuous latent-state intervention.
+The W2 gate demonstrates that the infrastructure can run end to end on real SPD-Faith paired data and real GPU models. The W3 gate adds true inference-time LVR hidden-feedback patching at `n=50`. W4 localizes which hidden-feedback steps drive that transfer at `n=50`, `lvr_steps=8`. These gates are stronger than the original proxy scaffold, but they are still not final paper-scale evidence.
 
-The next scientific milestone is W3/W4: combine trace-v2 hidden-feedback instrumentation with actual latent-state patching/replacement on LVR generation traces.
+The SPD range run treats `lvr_7b` as an LVR-weight model under query-span paired intervention, not as a true continuous latent-state intervention. The true latent-state evidence comes from the W3/W4 traced LVR runs.
 
 ## Architecture
 
@@ -22,6 +22,8 @@ lvr-eval-mechanistic-audit/
 ├── config.yaml
 ├── config.trace_v2.yaml
 ├── config.spd_faith.range.yaml
+├── config.lvr_latent_patch.range.yaml
+├── config.lvr_latent_patch.stepsweep.yaml
 ├── prereg/
 │   └── manifest.yaml
 ├── run_all.py
@@ -52,7 +54,8 @@ lvr-eval-mechanistic-audit/
     │   │   ├── bf_patch_answer_transfer.py
     │   │   ├── bf_swap_latent_replacement.py
     │   │   ├── bf_conf_calibrated_progression.py
-    │   │   └── cf_stage_decay.py
+    │   │   ├── cf_stage_decay.py
+    │   │   └── lvr_latent_patch_answer_transfer.py
     │   ├── bf3_confidence_progression.py
     │   ├── pf3_attention_distance.py
     │   ├── bf1_latent_ablation.py
@@ -106,6 +109,15 @@ There are three metric layers.
    | `cf_stage_decay` | `late_delta` | runnable-v0; `late_retention` is diagnostic only |
 
 W2 v2 metrics are validated as runnable-v0 gates. They are not yet full paper-grade causal evidence.
+
+4. **W3/W4 true LVR hidden-feedback intervention**
+
+   `lvr_latent_patch_answer_transfer` patches real `output_last_position_hidden_state` tensors captured from the LVR generation loop.
+
+   | mode | config | primary scalar | status |
+   |---|---|---|---|
+   | W3 last-step gate | `config.lvr_latent_patch.range.yaml` | `latent_answer_transfer_rate` | passed at n=50 |
+   | W4 step sweep | `config.lvr_latent_patch.stepsweep.yaml` | `best_step_transfer_rate`, `step_transfer_auc` | passed at n=50, lvr_steps=8 |
 
 ## Data Sources
 
@@ -208,6 +220,41 @@ Post-run validation:
 
 See [docs/validation_report_w2.md](/home/pengguangyue/workspace/proj/lvr-eval-mechanistic-audit/docs/validation_report_w2.md) for the recorded W2 gate.
 
+## W3/W4 Reproduction
+
+W3 latent patch gate:
+
+```bash
+bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
+  --config config.lvr_latent_patch.range.yaml \
+  --models lvr_7b \
+  --only lvr_latent_patch_answer_transfer \
+  --device cuda:0 \
+  --run-name w3_lvr_latent_patch_n50
+
+./venv/bin/python tools/validate_w3_latent.py \
+  runs/w3_lvr_latent_patch_n50 \
+  --min-pairs 50
+```
+
+W4 latent step-localization gate:
+
+```bash
+bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
+  --config config.lvr_latent_patch.stepsweep.yaml \
+  --models lvr_7b \
+  --only lvr_latent_patch_answer_transfer \
+  --device cuda:0 \
+  --run-name w4_lvr_latent_stepsweep_n50_s8
+
+./venv/bin/python tools/validate_w4_stepsweep.py \
+  runs/w4_lvr_latent_stepsweep_n50_s8 \
+  --min-pairs 50 \
+  --min-steps 2
+```
+
+See [docs/validation_report_w3.md](/home/pengguangyue/workspace/proj/lvr-eval-mechanistic-audit/docs/validation_report_w3.md) and [docs/validation_report_w4.md](/home/pengguangyue/workspace/proj/lvr-eval-mechanistic-audit/docs/validation_report_w4.md).
+
 ## Analysis
 
 `summary_with_ci.json` uses bootstrap confidence intervals. For v2 sample-level artifacts it groups derived rows by `paired_id`, falling back to `id`, before bootstrapping group-level values. This prevents multi-layer, multi-bucket, or multi-family derived rows from being counted as independent samples when group keys are present.
@@ -216,8 +263,8 @@ Legacy artifacts without group keys keep the old one-sample bootstrap fallback.
 
 ## Known Boundaries
 
-- W2 is a reproducibility and runnable-v0 gate, not a final causal-result package.
+- W2/W3/W4 are reproducibility and localization gates, not a final causal-result package.
 - `pf_b_patch_alignment` currently reports native attention-proxy alignment; DINO patch correspondence remains optional and disabled for the W2 gate.
-- `bf_swap_latent_replacement` now records self-swap, reverse-swap, and random-pair controls, but stronger W3/W4 controlled latent-block protocols are still needed.
+- `bf_swap_latent_replacement` now records self-swap, reverse-swap, and random-pair controls, but stronger controlled latent-block protocols are still needed.
 - `cf_stage_decay` uses `late_delta` as the primary scalar; `late_retention` can explode when the clean late-stage baseline is near zero and is diagnostic only.
-- True inference-time LVR latent-state patching remains a future milestone beyond the W2 SPD query-span range gate.
+- W4 step localization uses `lvr_steps=8`; broader tasks, larger sample sizes, and layer-level localization remain future work.
