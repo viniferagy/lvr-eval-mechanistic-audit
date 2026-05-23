@@ -165,6 +165,7 @@ validation:
     min_pairs: 50
     max_error_ratio: 0.2
     allow_center_fallback: false
+    self_swap_max_abs_shift: 0.05
 
 output:
   root: "./runs"

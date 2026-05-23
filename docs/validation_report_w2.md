@@ -2,15 +2,28 @@
 
 Date: 2026-05-23
 
-This report records the reviewer-gated W2-alpha -> W2-final validation run. It is a runnable-v0 gate result, not a paper-grade causal conclusion.
+This report records the reviewer-gated W2-final cleanup validation. It is a runnable-v0 gate result, not a paper-grade causal conclusion.
 
 ## Commands
 
 CPU checks:
 
 ```bash
-MPLCONFIGDIR=/tmp/matplotlib-lvr-eval ./venv/bin/python -m py_compile run_all.py smoke_test.py merge_and_analyze.py pipeline/*.py pipeline/sanity/*.py pipeline/metrics/*.py pipeline/metrics/legacy/*.py pipeline/metrics/v2/*.py pipeline/adapters/*.py pipeline/stats/*.py tools/validate_spd_range.py
+MPLCONFIGDIR=/tmp/matplotlib-lvr-eval ./venv/bin/python -m py_compile \
+  run_all.py smoke_test.py merge_and_analyze.py \
+  pipeline/*.py pipeline/sanity/*.py pipeline/metrics/*.py \
+  pipeline/metrics/legacy/*.py pipeline/metrics/v2/*.py \
+  pipeline/adapters/*.py pipeline/stats/*.py tools/*.py
+
 MPLCONFIGDIR=/tmp/matplotlib-lvr-eval ./venv/bin/python smoke_test.py
+```
+
+SPD-Faith prepare smoke:
+
+```bash
+./venv/bin/python tools/prepare_spd_faith_hf.py \
+  --max-per-split 2 \
+  --out /tmp/spd_faith_prepare_smoke
 ```
 
 Trace v2 gate:
@@ -30,7 +43,9 @@ SPD-Faith range gate:
 bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
   --config config.spd_faith.range.yaml \
   --models qwen2_5_vl_3b qwen2_5_vl_7b lvr_7b \
-  --only pf_a_corruption_selectivity pf_b_patch_alignment bf_patch_answer_transfer bf_swap_latent_replacement bf_conf_calibrated_progression cf_stage_decay \
+  --only pf_a_corruption_selectivity pf_b_patch_alignment \
+         bf_patch_answer_transfer bf_swap_latent_replacement \
+         bf_conf_calibrated_progression cf_stage_decay \
   --device cuda:0 \
   --run-name w2_final_spd_range_m0_m1_m2_n50
 ```
@@ -38,20 +53,26 @@ bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
 Post-run validator:
 
 ```bash
-./venv/bin/python tools/validate_spd_range.py runs/w2_final_spd_range_m0_m1_m2_n50 --min-pairs 50
+./venv/bin/python tools/validate_spd_range.py \
+  runs/w2_final_spd_range_m0_m1_m2_n50 \
+  --min-pairs 50
 ```
 
 ## Data
 
-Source: `data/spd_faith_hf/manifest.jsonl`
+Public source: `Jackson-Lv/SPD-Faith-Bench`
+
+Local prepared source: `data/spd_faith_hf/manifest.jsonl`
 
 Prepare stats: `data/spd_faith_hf/prepare_stats.json`
 
 Images: `data/spd_faith_hf/images`
 
-`prepare_stats.json`: dataset `Jackson-Lv/SPD-Faith-Bench`, `n_written=2996`, answer policy `clean=original, counterfactual=modified`.
+`prepare_stats.json`: `n_written=2996`, answer policy `clean=original, counterfactual=modified`.
 
-Final range config required a real region oracle (`require_region_or_bbox: true`): 2831 usable pairs, 165 records skipped for missing region/bbox annotation, 50 sampled pairs.
+The final range config requires a real region oracle (`require_region_or_bbox: true`): 2831 usable pairs, 165 records skipped for missing region/bbox annotation, 50 sampled pairs.
+
+The prepare smoke wrote 8 records under `/tmp/spd_faith_prepare_smoke`, including clean/counterfactual image files, answers, bboxes, and `prepare_stats.json`.
 
 ## Trace Gate
 
@@ -60,6 +81,14 @@ Run dir: `runs/w2_final_trace_v2_lvr_n3`
 Config: `config.trace_v2.yaml`
 
 Model: `lvr_7b`
+
+Trace hard requirements:
+
+```yaml
+trace_v2:
+  required: true
+  forbid_fallback: true
+```
 
 Result:
 
@@ -82,15 +111,18 @@ Config: `config.spd_faith.range.yaml`
 
 Models: `qwen2_5_vl_3b`, `qwen2_5_vl_7b`, `lvr_7b`
 
+This is a paired SPD query-span intervention range gate. The `lvr_7b` rows are not true inference-time latent-state intervention evidence.
+
 Artifacts:
 
 | artifact | result |
 |---|---:|
 | metric JSON files | 18 |
 | sanity reports | 18 pass, 0 warn, 0 fail |
-| summary_with_ci rows | 63 |
+| summary_with_ci rows | 66 |
 | paired BF-Patch n_success/n_error | 50/0 per model |
 | paired BF-Swap n_success/n_error | 50/0 per model |
+| BF-Swap controls | self-swap, reverse-swap, random-pair swap |
 
 Primary reductions:
 
@@ -101,34 +133,44 @@ Primary reductions:
 | BF-Patch logprob_margin_shift | 0.015000 | 0.010000 | -0.048828 |
 | BF-Swap swap_margin_shift | 0.010000 | -0.002500 | -0.034141 |
 | BF-Conf gold_logit_slope | 0.197275 | 0.344212 | 0.068481 |
-| CF-Stage late_retention | 1829121260.841688 | 2253330912.854936 | 1307643178.436491 |
+| CF-Stage late_delta | 1.829121 | 2.253331 | 1.307643 |
 
-Primary CI rows (`summary_with_ci.json`, 5000 bootstrap resamples, seed 260523):
+BF-Swap control reductions:
+
+| control | qwen2_5_vl_3b | qwen2_5_vl_7b | lvr_7b |
+|---|---:|---:|---:|
+| self_swap | 0.000000 | 0.000000 | 0.000000 |
+| reverse_swap | 0.007500 | -0.010000 | 0.021953 |
+| random_pair_swap | 0.012500 | -0.015000 | -0.016094 |
+
+Primary CI rows (`summary_with_ci.json`, grouped by `paired_id` fallback `id`, 5000 bootstrap resamples, seed 260523):
 
 | metric/model/scalar | n | mean | ci_low | ci_high |
 |---|---:|---:|---:|---:|
-| PF-A/qwen2_5_vl_3b/selectivity | 50 | 0.256129 | 0.183051 | 0.324153 |
-| PF-A/qwen2_5_vl_7b/selectivity | 50 | 0.247687 | 0.181326 | 0.308651 |
-| PF-A/lvr_7b/selectivity | 50 | 0.250040 | 0.205447 | 0.294718 |
-| PF-B/qwen2_5_vl_3b/native_alignment | 50 | 0.740718 | 0.694881 | 0.785948 |
-| PF-B/qwen2_5_vl_7b/native_alignment | 50 | 0.702077 | 0.659535 | 0.745873 |
-| PF-B/lvr_7b/native_alignment | 50 | 0.806338 | 0.773008 | 0.838605 |
-| BF-Patch/qwen2_5_vl_3b/logprob_margin_shift | 50 | 0.015000 | -0.007500 | 0.037500 |
-| BF-Patch/qwen2_5_vl_7b/logprob_margin_shift | 50 | 0.010000 | -0.017500 | 0.035000 |
-| BF-Patch/lvr_7b/logprob_margin_shift | 50 | -0.048828 | -0.084377 | -0.014297 |
-| BF-Swap/qwen2_5_vl_3b/swap_margin_shift | 50 | 0.010000 | -0.010000 | 0.030000 |
+| PF-A/qwen2_5_vl_3b/selectivity | 50 | 0.256129 | 0.183538 | 0.323213 |
+| PF-A/qwen2_5_vl_7b/selectivity | 50 | 0.247687 | 0.182228 | 0.310932 |
+| PF-A/lvr_7b/selectivity | 50 | 0.250040 | 0.205558 | 0.294823 |
+| PF-B/qwen2_5_vl_3b/native_alignment | 50 | 0.740718 | 0.695961 | 0.784680 |
+| PF-B/qwen2_5_vl_7b/native_alignment | 50 | 0.702077 | 0.660738 | 0.744787 |
+| PF-B/lvr_7b/native_alignment | 50 | 0.806338 | 0.774283 | 0.838802 |
+| BF-Patch/qwen2_5_vl_3b/logprob_margin_shift | 50 | 0.015000 | -0.007500 | 0.040000 |
+| BF-Patch/qwen2_5_vl_7b/logprob_margin_shift | 50 | 0.010000 | -0.015000 | 0.035000 |
+| BF-Patch/lvr_7b/logprob_margin_shift | 50 | -0.048828 | -0.083594 | -0.013281 |
+| BF-Swap/qwen2_5_vl_3b/swap_margin_shift | 50 | 0.010000 | -0.012500 | 0.030000 |
 | BF-Swap/qwen2_5_vl_7b/swap_margin_shift | 50 | -0.002500 | -0.032500 | 0.027500 |
-| BF-Swap/lvr_7b/swap_margin_shift | 50 | -0.034141 | -0.078438 | 0.010080 |
-| BF-Conf/qwen2_5_vl_3b/gold_logit_slope | 50 | 0.197275 | 0.191920 | 0.202327 |
-| BF-Conf/qwen2_5_vl_7b/gold_logit_slope | 50 | 0.344212 | 0.332231 | 0.355746 |
-| BF-Conf/lvr_7b/gold_logit_slope | 50 | 0.068481 | 0.063791 | 0.073092 |
-| CF-Stage/qwen2_5_vl_3b/late_retention | 50 | 1829121260.841688 | 1742996867.063145 | 1922794570.120672 |
-| CF-Stage/qwen2_5_vl_7b/late_retention | 50 | 2253330912.854936 | 2155290780.630377 | 2359334859.828155 |
-| CF-Stage/lvr_7b/late_retention | 50 | 1307643178.436491 | 1248655374.965734 | 1370836147.122913 |
+| BF-Swap/lvr_7b/swap_margin_shift | 50 | -0.034141 | -0.078205 | 0.008365 |
+| BF-Conf/qwen2_5_vl_3b/gold_logit_slope | 50 | 0.197275 | 0.191914 | 0.202321 |
+| BF-Conf/qwen2_5_vl_7b/gold_logit_slope | 50 | 0.344212 | 0.331840 | 0.355731 |
+| BF-Conf/lvr_7b/gold_logit_slope | 50 | 0.068481 | 0.063958 | 0.072880 |
+| CF-Stage/qwen2_5_vl_3b/late_delta | 50 | 1.829121 | 1.745603 | 1.928477 |
+| CF-Stage/qwen2_5_vl_7b/late_delta | 50 | 2.253331 | 2.156904 | 2.352151 |
+| CF-Stage/lvr_7b/late_delta | 50 | 1.307643 | 1.248247 | 1.370573 |
 
 ## Notes
 
-- Trace v2 initially failed correctly under hard-fail sanity when full-resolution LVR samples OOMed and attempted fallback. The final trace gate uses a bounded 384px image budget and passes with true sparse instrumentation.
-- The first SPD range attempt correctly failed PF sanity when random sampling included 4 samples without bbox/region masks. The final config requires region/bbox oracle before sampling.
+- `prereg/manifest.yaml` uses `manifest_version: 0.2-w2-final-gate` and CF-Stage primary scalar `late_delta`.
+- `summary_with_ci.json` now groups derived sample rows by `paired_id`, falling back to `id`, before bootstrapping.
+- BF-Swap now records self-swap, reverse-swap, and random-pair swap controls. The final validator requires all three controls and self-swap near zero.
+- `apply_mask()` now has continuous severity semantics: 0 is clean, 1 is full replacement, and intermediate values alpha-blend the fill color.
+- CF-Stage `late_retention` remains present as a diagnostic because near-zero clean late-stage baselines can make it very large. It is no longer the preregistered primary scalar.
 - DINO remains optional and disabled for this gate; PF-B reports native attention-proxy alignment.
-- CF-Stage `late_retention` values are very large because the clean late-stage baseline is near zero under this runnable-v0 proxy. Treat CF-Stage as a gate artifact requiring semantic calibration before main-paper use.

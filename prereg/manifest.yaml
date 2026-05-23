@@ -34,7 +34,7 @@ primary_metrics:
     status: "runnable_v0_validated"
   - metric_id: "cf_stage_decay"
     family: "CF"
-    primary_scalar: "late_retention"
+    primary_scalar: "late_delta"
     version: "0.2-w2-final-gate"
     status: "runnable_v0_validated"
 statistics:

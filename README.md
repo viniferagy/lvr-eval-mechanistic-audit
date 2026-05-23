@@ -1,38 +1,58 @@
 # LVR-Eval Mechanistic Audit
 
-`lvr-eval-mechanistic-audit` 是一个面向 VLM/LVR 的内部机制审计框架。它把模型、数据集、审计 span、metric、sanity check 和 analysis 拆成清晰的模块，让 Qwen baseline 与 LVR 模型可以在同一套 runner 中比较。
+`lvr-eval-mechanistic-audit` is a reproducible audit scaffold for VLM/LVR mechanistic experiments. It compares Qwen baselines and LVR-style models through a shared runner, explicit adapter spans, preregistered metric metadata, v2 causal metric entry points, sanity gates, and analysis artifacts.
 
-核心原则：
+## Current Status
 
-- metric 都是 `pipeline/metrics/` 下的平级模块，通过 registry 调度。
-- metric 不直接猜 token layout，而是通过 adapter 返回的 `AuditSpans` 定位审计对象。
-- Qwen baseline 没有 latent tokens，只使用 `answer_probe_pos` 作为 control query span。
-- LVR teacher-forced 审计使用 `<|lvr|>` placeholder positions。
-- LVR inference-time 审计应使用 generation trace 中的 continuous latent state，例如 `lvr_mode_switch` 与 `last_position_hidden_state`。
-- `<|image_pad|>` 之后的文本不是 LVR latent；旧 post-image text helper 只保留作历史结果调试。
+This repository is currently at:
 
-**Architecture**
-
+```text
+Engineering stage: W2-final-gate / runnable-v0 validation passed
+Scientific stage: range-level validation scaffold, not paper-grade causal evidence
 ```
+
+The W2 gate demonstrates that the infrastructure can run end to end on real SPD-Faith paired data and real GPU models. It does **not** yet justify strong claims about inference-time LVR latent-state causality. In particular, the SPD range run treats `lvr_7b` as an LVR-weight model under query-span paired intervention, not as a true continuous latent-state intervention.
+
+The next scientific milestone is W3/W4: combine trace-v2 hidden-feedback instrumentation with actual latent-state patching/replacement on LVR generation traces.
+
+## Architecture
+
+```text
 lvr-eval-mechanistic-audit/
 ├── config.yaml
+├── config.trace_v2.yaml
+├── config.spd_faith.range.yaml
+├── prereg/
+│   └── manifest.yaml
 ├── run_all.py
-├── launch_sharded.sh
 ├── merge_and_analyze.py
 ├── smoke_test.py
 ├── tools/
+│   ├── prepare_spd_faith_hf.py
+│   ├── validate_spd_range.py
 │   ├── run_and_hold.sh
 │   └── hold_gpu.py
 ├── docs/
-│   └── validation_report.md
+│   ├── validation_report.md
+│   └── validation_report_w2.md
 └── pipeline/
     ├── adapters/
     │   ├── base.py
     │   ├── qwen_vl.py
     │   ├── lvr_qwen.py
+    │   ├── lvr_qwen_traced.py
+    │   ├── probe_catalog.py
     │   ├── spans.py
     │   └── registry.py
     ├── metrics/
+    │   ├── legacy/
+    │   ├── v2/
+    │   │   ├── pf_a_corruption_selectivity.py
+    │   │   ├── pf_b_patch_alignment.py
+    │   │   ├── bf_patch_answer_transfer.py
+    │   │   ├── bf_swap_latent_replacement.py
+    │   │   ├── bf_conf_calibrated_progression.py
+    │   │   └── cf_stage_decay.py
     │   ├── bf3_confidence_progression.py
     │   ├── pf3_attention_distance.py
     │   ├── bf1_latent_ablation.py
@@ -41,8 +61,16 @@ lvr-eval-mechanistic-audit/
     │   ├── lvr_generation_trace.py
     │   └── registry.py
     ├── sanity/
+    │   ├── report.py
+    │   └── v2.py
+    ├── stats/
+    │   ├── bootstrap.py
+    │   └── mixed_effects.py
     ├── data.py
-    ├── model_utils.py
+    ├── data_spd_faith.py
+    ├── data_maze.py
+    ├── preregistration.py
+    ├── corruptions.py
     ├── internal_metrics.py
     ├── ablation.py
     ├── degradation.py
@@ -50,330 +78,146 @@ lvr-eval-mechanistic-audit/
     └── analysis.py
 ```
 
-`run_all.py` 负责读取 config、加载 probe set、加载模型、执行选中的 metric、写统一 result envelope、运行 sanity check，并调用 analysis。`launch_sharded.sh` 用于多 GPU 分片运行；`merge_and_analyze.py` 用于合并 sharded 输出并重新生成 sanity/analysis artifact。
+`run_all.py` reads the config, loads probe samples, resolves adapters and metrics, writes `config_snapshot.yaml` and `prereg.lock.json`, runs sanity checks, and produces analysis artifacts such as `summary.json` and `summary_with_ci.json`.
 
-**Adapters**
+## Metric Layers
 
-Adapters 是模型语义边界。metric 只依赖 wrapper 与 adapter，不直接解析 prompt token。
+There are three metric layers.
 
-`QwenVLAdapter`：
+1. **Legacy regression references**
 
-- 适用于 `qwen2_5_vl` / `qwen3_vl` / `auto`。
-- 通过 `<|image_pad|>` 定位 image token span。
-- 返回 `latent_tokens=None`。
-- 返回 `answer_probe_pos` 作为 baseline control query span。
+   The `_legacy` metrics freeze the old proxy behavior for regression testing only. They are useful for continuity and sanity checks, but they do not support the main causal claim.
 
-`LVRQwenAdapter`：
+   Aliases include `bf3_legacy`, `pf3_legacy`, `bf1_legacy`, `bf1_layer_legacy`, `cf2_legacy`, and `lvr_trace_legacy`.
 
-- 适用于 `lvr_qwen2_5_vl` / `lvr` / `qwen_lvr`。
-- 使用官方 `QwenWithLVR` 与 LVR monkey patch 加载路径。
-- 识别 `lvr_start_id`、`lvr_id`、`lvr_latent_end_id`、`lvr_end_id`。
-- teacher-forced 模式下通过 `<|lvr|>` token 定位 `lvr_placeholder_tokens`。
-- `generate_with_trace()` 提供 inference-time trace 的第一版入口；当前 trace quality 标记为 approximate，后续应直接 instrument 官方 generation loop。
+2. **Base proxy metrics**
 
-`AuditSpans` 位于 `pipeline/adapters/spans.py`：
+   These are the original runnable metrics: BF-3 confidence progression, PF-3 attention distance, BF-1 ablation, CF-2/PF decay, and LVR generation trace.
 
-- `image_tokens`
-- `question_tokens`
-- `lvr_placeholder_tokens`
-- `latent_tokens`
-- `answer_probe_pos`
+3. **W2 v2 causal-metric scaffold**
 
-metric 使用 `spans.preferred_query_span()` 选择 query side：
+   | metric id | primary scalar | W2 status |
+   |---|---|---|
+   | `pf_a_corruption_selectivity` | `selectivity` | runnable-v0 |
+   | `pf_b_patch_alignment` | `native_alignment` | runnable native-attention proxy |
+   | `bf_patch_answer_transfer` | `logprob_margin_shift` | runnable-v0 sequence logprob scoring |
+   | `bf_swap_latent_replacement` | `swap_margin_shift` | runnable-v0 with self/reverse/random controls |
+   | `bf_conf_calibrated_progression` | `gold_logit_slope` | runnable-v0 |
+   | `cf_stage_decay` | `late_delta` | runnable-v0; `late_retention` is diagnostic only |
 
-- LVR latent/placeholder 优先。
-- Qwen fallback 到 `answer_probe_pos`。
-- 无有效 query span 时直接报错。
+W2 v2 metrics are validated as runnable-v0 gates. They are not yet full paper-grade causal evidence.
 
-**Metrics**
+## Data Sources
 
-所有 metric 都是 registry 下的同级模块，既可以单独运行，也可以被 analysis 汇总。
+Supported `data.source_type` values include:
 
-`bf3_confidence_progression`
+- `jsonl`
+- `hf`
+- `lvr_json`
+- `spd_faith`
+- `maze`
 
-- 类型：internal curve readout。
-- 输入：adapter query span。
-- 输出：逐层 logit-lens entropy curve。
-- 主要标量：`early_to_late_drop`、`final_entropy`、`mean_entropy`。
-- 语义：观察 query position 的 confidence sharpening 是否随 decoder layer 推进。
+`spd_faith` is the paired counterfactual entry point used for the W2 range gate. It expects fields for clean/counterfactual images, clean/counterfactual answers, `paired_id`, and either bbox or region-mask oracle metadata.
 
-`pf3_attention_distance`
+Prepare the canonical local SPD-Faith manifest from the public Hugging Face dataset:
 
-- 类型：internal curve readout。
-- 输入：query span 与 image token span。
-- 输出：intact image 与 corrupted image 的 query-to-image attention KL curve。
-- 主要标量：`mean_kl`、`mid_kl`、`peak_kl`。
-- 语义：观察 query representation 对视觉证据扰动的内部注意力敏感度。
+```bash
+./venv/bin/python tools/prepare_spd_faith_hf.py \
+  --out data/spd_faith_hf
+```
 
-`bf1_latent_ablation`
+For a tiny conversion smoke:
 
-- 类型：sweep。
-- 默认行为：targeted span ablation。
-- 输入：adapter `preferred_query_span()`。
-- 输出：逐层 targeted ablation 后的 BF-3/PF-3 readout 变化。
-- 主要标量：`delta.bf3`、`delta.pf3`。
-- 语义：估计各 decoder layer 对审计 query span 的 causal contribution。
+```bash
+./venv/bin/python tools/prepare_spd_faith_hf.py \
+  --max-per-split 2 \
+  --out /tmp/spd_faith_prepare_smoke
+```
 
-`bf1_layer_ablation`
+This writes:
 
-- 类型：sweep。
-- 默认关闭。
-- 行为：legacy whole-layer ablation。
-- 用途：保留旧整层消融对照；不作为默认 latent ablation 解释。
+```text
+data/spd_faith_hf/manifest.jsonl
+data/spd_faith_hf/prepare_stats.json
+data/spd_faith_hf/images/
+```
 
-`cf2_pf_decay_curve`
+## Trace v2
 
-- 类型：sweep。
-- 输入：corruption family 与 severity list。
-- 输出：severity 轴上的 readout curve。
-- 默认 readout：`pf3_attention_distance`。
-- 主要特征：`auc`、`char_severity`、`rel_change`。
-- 语义：观察内部视觉依赖信号如何随图像退化而变化。
-
-`lvr_generation_trace`
-
-- 类型：trace。
-- 输入：LVR adapter 的 `generate_with_trace()`。
-- 输出：generated text、LVR token positions、trace quality、trace notes。
-- 用途：为 inference-time LVR 审计保存生成轨迹。当前版本是第一版 trace 接口，长期版本应直接记录每一步 `lvr_mode_switch` 和 `last_position_hidden_state`。
-
-**Config**
-
-模型配置示例：
+Trace v2 is exposed through the traced adapter arch:
 
 ```yaml
 models:
-  qwen2_5_vl_7b:
-    name: "Qwen2.5-VL-7B"
-    path: "./models/Qwen/Qwen2___5-VL-7B-Instruct"
-    arch: "qwen2_5_vl"
-    image_pad_token: "<|image_pad|>"
-
   lvr_7b:
-    name: "LVR-7B"
-    path: "./models/LVR-7B"
-    arch: "lvr_qwen2_5_vl"
-    lvr_source_path: "../lvr"
-    image_pad_token: "<|image_pad|>"
-    lvr_start_token: "<|lvr_start|>"
-    lvr_token: "<|lvr|>"
-    lvr_latent_end_token: "<|lvr_latent_end|>"
-    lvr_end_token: "<|lvr_end|>"
+    arch: "lvr_qwen2_5_vl_traced"
+
+trace_v2:
+  required: true
+  forbid_fallback: true
 ```
 
-审计配置：
+`config.trace_v2.yaml` runs the trace gate on LVR JSON samples. The trace metric now hard-fails when trace v2 is required but sparse instrumentation falls back, reports missing modules, or does not return `trace_quality=instrumented_sparse_v0`.
 
-```yaml
-audit:
-  mode: "teacher_forced"
-  query_target: "auto"
-  lvr_expansion_mode: "fixed"
-  lvr_num_tokens: 16
-  lvr_include_latent_end_token: false
-  allow_lvr_fallback_to_answer_probe: false
-  allow_synthetic_lvr_assistant: false
-  lvr_decoding_strategy: "steps"
-  lvr_steps: 16
-```
+The SPD range config intentionally does not use traced latent-state intervention. It runs paired query-span interventions on SPD-Faith for Qwen/LVR-weight comparison.
 
-LVR 官方 JSON list 数据：
+## W2 Reproduction
 
-```yaml
-data:
-  source_type: "lvr_json"
-  json_path: "./data/viscot_363k_lvr_formatted.json"
-  image_root: "./data/images"
-  max_samples: 50
-  skip_missing_images: true
-  require_lvr_placeholder: true
-```
-
-`lvr_json` loader 读取官方 LLaVA-style list record，并保留完整 metadata：
-
-- `image`
-- `conversations`
-- assistant-side `<lvr>`
-- optional `bboxes`
-- `dataset`
-
-在 `audit.mode=teacher_forced` 时，`LVRQwenAdapter` 会把 assistant 文本中的第一个 `<lvr>` 展开为：
-
-```text
-<|lvr_start|><|lvr|>...<|lvr|><|lvr_end|>
-```
-
-LVR token expansion follows the official `proj/lvr/src/dataset/data_utils.py::replace_lvr_tokens()` semantics.
-
-In the currently implemented teacher-forced fixed-token mode:
-
-```text
-<lvr>
-  -> <|lvr_start|> + N x <|lvr|> + <|lvr_end|>
-```
-
-where `N = audit.lvr_num_tokens`.
-
-Important: this fixed-token branch does **not** insert `<|lvr_latent_end|>`. The official code only inserts `<|lvr_latent_end|>` in the dynamic token-index branch, when `fixed_num_of_lvr_tokens is None` and `latent_end_token` is enabled. This repo currently does not implement that dynamic `lvr_token_idxs_list` branch.
-
-`lvr_latent_end_token` is still configured and its token id is still resolved, because the official model defines it and generation-time traces may encounter it. `allow_lvr_fallback_to_answer_probe=false` 时，如果 LVR teacher-forced 输入中没有产生 `<|lvr|>` span，run 会 fail，而不是悄悄退回 answer-probe control。
-
-By default, LVR teacher-forced mode also requires `sample.lvr_assistant` to contain an official assistant-side `<lvr>` placeholder. `allow_synthetic_lvr_assistant=false` prevents ordinary VQA samples from being silently converted into fake LVR examples. The `lvr_json` loader likewise defaults to `require_lvr_placeholder=true` and skips records whose assistant message has no `<lvr>`.
-
-`launch_sharded.sh` runs a preflight before starting GPU jobs. It fails early if the LVR source checkout is missing or if the probe set is empty. For Visual-CoT/LVR JSON, `image_root` must point to extracted images containing paths such as `viscot/flickr30k/...`; having only `cot_images_tar_split/*` downloaded is not enough.
-
-metric 开关：
-
-```yaml
-metrics:
-  bf3_confidence_progression:
-    enabled: true
-  pf3_attention_distance:
-    enabled: true
-  bf1_latent_ablation:
-    enabled: true
-  bf1_layer_ablation:
-    enabled: false
-  cf2_pf_decay_curve:
-    enabled: true
-  lvr_generation_trace:
-    enabled: false
-```
-
-`all` 只运行 enabled metric。显式 `--only bf1_layer` 或 `--only lvr_trace` 会运行对应 metric，即使它默认 disabled。
-
-**Run**
-
-安装依赖并先跑 smoke：
+CPU checks:
 
 ```bash
-pip install -r requirements.txt
-python smoke_test.py
+MPLCONFIGDIR=/tmp/matplotlib-lvr-eval ./venv/bin/python -m py_compile \
+  run_all.py smoke_test.py merge_and_analyze.py \
+  pipeline/*.py pipeline/sanity/*.py pipeline/metrics/*.py \
+  pipeline/metrics/legacy/*.py pipeline/metrics/v2/*.py \
+  pipeline/adapters/*.py pipeline/stats/*.py tools/*.py
+
+MPLCONFIGDIR=/tmp/matplotlib-lvr-eval ./venv/bin/python smoke_test.py
 ```
 
-常用命令：
+Trace v2 gate:
 
 ```bash
-python run_all.py --config config.yaml --models qwen2_5_vl_7b lvr_7b
-python run_all.py --config config.yaml --models lvr_7b --only bf3 pf3
-python run_all.py --config config.yaml --models qwen2_5_vl_7b --only bf1
-python run_all.py --config config.yaml --models lvr_7b --only cf2_pf_decay_curve
-python run_all.py --config config.yaml --models lvr_7b --only lvr_trace
-python run_all.py --config config.yaml --models qwen2_5_vl_7b --no-sanity
+bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
+  --config config.trace_v2.yaml \
+  --models lvr_7b \
+  --only lvr_generation_trace \
+  --device cuda:0 \
+  --run-name w2_final_trace_v2_lvr_n3
 ```
 
-`lvr_trace` uses generation-time prompts, so it records generated LVR block positions rather than requiring teacher-forced `<|lvr|>` placeholders in the prompt. It can be launched with the default config; the trace adapter treats prompt spans as baseline controls and stores generated LVR positions separately.
-
-服务器上需要 GPU 独占时，GPU 命令统一走 wrapper：
+SPD-Faith range gate:
 
 ```bash
-bash tools/run_and_hold.sh 0,1,2,3 launch_sharded.sh
-bash tools/run_and_hold.sh 0,1,2,3 ../.venv/bin/python merge_and_analyze.py --dir runs/<run>
+bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
+  --config config.spd_faith.range.yaml \
+  --models qwen2_5_vl_3b qwen2_5_vl_7b lvr_7b \
+  --only pf_a_corruption_selectivity pf_b_patch_alignment \
+         bf_patch_answer_transfer bf_swap_latent_replacement \
+         bf_conf_calibrated_progression cf_stage_decay \
+  --device cuda:0 \
+  --run-name w2_final_spd_range_m0_m1_m2_n50
 ```
 
-`tools/hold_gpu.py` 会在命令结束后重新 hold 可见 GPU，并周期性自动扩张 ballast。
-
-**Outputs**
-
-每个 metric 会写统一 envelope：
-
-```text
-runs/<run>/metrics/<metric_id>_<model>.json
-```
-
-兼容历史 analysis 的 metric 也会写 legacy result：
-
-```text
-runs/<run>/bf1_<model>.json
-runs/<run>/cf2_<model>.json
-```
-
-analysis 输出：
-
-- `summary.json`
-- `rank_correlation.json`
-- `radar_4metric.png`
-- `bf1_layerwise_bf3.png`
-- `bf1_baseline_bf3_curve.png`
-- `cf2_decay_<family>.png`
-- `metric_results_summary.json`
-- `metric_plots/*.png`
-
-BF-1/CF-2 payload 会记录 span metadata：
-
-```json
-{
-  "query_target_kind": "lvr_placeholder_tokens",
-  "query_span": [3, 6],
-  "image_span": [0, 2],
-  "adapter_notes": {}
-}
-```
-
-聚合结果还会记录：
-
-```json
-{
-  "n_total": 50,
-  "n_success": 48,
-  "n_skipped": 2,
-  "skip_reasons": {},
-  "query_target_counts": {
-    "lvr_placeholder_tokens": 48
-  }
-}
-```
-
-**Sanity Checks**
-
-默认运行 sanity，并写入：
-
-```text
-runs/<run>/sanity/
-```
-
-覆盖内容：
-
-- BF-3 curve length、finite、entropy drop、monotonicity。
-- PF-3 KL non-negative、nonzero signal、mid-layer signal。
-- BF-1 baseline/layer result/delta 是否存在且非零。
-- CF-2 severity axis、finite curve、severity=0 clean baseline、trend。
-- span metadata valid rate、Qwen `answer_probe_pos`、LVR `<|lvr|>` placeholder、query/image span 不混淆。
-
-`validation.fail_fast: true` 时 sanity fail 会让 run 以非零退出；默认只 warning。
-
-**Validation**
-
-当前无模型 smoke 覆盖：
-
-- corruption operators。
-- severity=0 clean baseline。
-- Qwen baseline span semantics。
-- LVR teacher-forced span semantics。
-- registry metric aliases。
-- curve reductions。
-- data field mapping。
-- LVR JSON list loader。
-- assistant-side `<lvr>` expansion。
-- sanity reports。
-- unified MetricResult 到 analysis artifacts。
-
-运行：
+Post-run validation:
 
 ```bash
-python -m py_compile run_all.py smoke_test.py merge_and_analyze.py pipeline/*.py pipeline/sanity/*.py pipeline/metrics/*.py pipeline/adapters/*.py
-python smoke_test.py
+./venv/bin/python tools/validate_spd_range.py \
+  runs/w2_final_spd_range_m0_m1_m2_n50 \
+  --min-pairs 50
 ```
 
-完整服务器验证记录见：
+See [docs/validation_report_w2.md](/home/pengguangyue/workspace/proj/lvr-eval-mechanistic-audit/docs/validation_report_w2.md) for the recorded W2 gate.
 
-```text
-docs/validation_report.md
-```
+## Analysis
 
-**Notes**
+`summary_with_ci.json` uses bootstrap confidence intervals. For v2 sample-level artifacts it groups derived rows by `paired_id`, falling back to `id`, before bootstrapping group-level values. This prevents multi-layer, multi-bucket, or multi-family derived rows from being counted as independent samples when group keys are present.
 
-- 真实 BF-3/PF-3/BF-1/CF-2 forward 需要 GPU 与本地权重。
-- PF-3 使用 eager attention，显存压力较高。
-- `data.max_samples` 建议先用小样本 smoke，再扩大。
-- 新增模型时优先增加 adapter；新增审计方法时增加 metric module 与 registry entry。
-- 新增数据集优先通过 `data.field_map` 配字段，不改 metric 代码。
+Legacy artifacts without group keys keep the old one-sample bootstrap fallback.
+
+## Known Boundaries
+
+- W2 is a reproducibility and runnable-v0 gate, not a final causal-result package.
+- `pf_b_patch_alignment` currently reports native attention-proxy alignment; DINO patch correspondence remains optional and disabled for the W2 gate.
+- `bf_swap_latent_replacement` now records self-swap, reverse-swap, and random-pair controls, but stronger W3/W4 controlled latent-block protocols are still needed.
+- `cf_stage_decay` uses `late_delta` as the primary scalar; `late_retention` can explode when the clean late-stage baseline is near zero and is diagnostic only.
+- True inference-time LVR latent-state patching remains a future milestone beyond the W2 SPD query-span range gate.

@@ -542,6 +542,33 @@ def test_lvr_trace_metric_payload():
     print("  trace metric preserves latent_end/block metadata -> ok")
 
 
+def test_lvr_trace_required_hard_fail():
+    print("\n== 10a. LVR trace v2 required hard fail ==")
+
+    class FallbackAdapter:
+        def generate_with_trace(self, wrapper, image, question, **kwargs):
+            return {
+                "generated_text": "fallback",
+                "trace_quality": "approx_from_generated_token_ids",
+                "trace_v2_error": "hook failed",
+                "missing_modules": ["embed_tokens"],
+            }
+
+    wrapper = SimpleNamespace(adapter=FallbackAdapter())
+    sample = SimpleNamespace(id="s0", image=make_img(), question="Q?")
+    try:
+        run_lvr_trace_metric(
+            wrapper,
+            [sample],
+            {"trace_v2": {"required": True, "forbid_fallback": True}},
+            "fake_lvr",
+        )
+        raise AssertionError("required trace v2 should hard-fail on fallback")
+    except RuntimeError as exc:
+        assert "trace v2 required" in str(exc)
+    print("  required trace v2 raises before fallback artifact can pass -> ok")
+
+
 def test_trace_recorder_fake_model():
     print("\n== 10b. LVR trace v2 fake hooks ==")
     try:
@@ -611,6 +638,17 @@ def test_preregistration_and_bootstrap():
         })
     ], seed=1)
     assert rows and rows[0]["scalar"] == "early_to_late_drop"
+    grouped_rows = build_summary_with_ci([
+        make_metric_result("bf_patch_answer_transfer", "fake", {
+            "samples": [
+                {"id": "a0", "paired_id": "a", "reduction": {"logprob_margin_shift": 1.0}},
+                {"id": "a1", "paired_id": "a", "reduction": {"logprob_margin_shift": 3.0}},
+                {"id": "b0", "paired_id": "b", "reduction": {"logprob_margin_shift": 5.0}},
+            ]
+        })
+    ], seed=1)
+    row = next(r for r in grouped_rows if r["scalar"] == "logprob_margin_shift")
+    assert row["n"] == 2 and abs(row["mean"] - 3.5) < 1e-9
     for item in manifest["primary_metrics"]:
         spec = get_metric(item["metric_id"])
         schema = spec.require_run().__globals__.get("build_schema", lambda: {})()
@@ -638,6 +676,8 @@ def test_v2_corruptions_and_patch_schema():
     assert int((rel.data & irr.data).sum()) == 0
     assert np.array_equal(rnd1.data, rnd2.data)
     assert np.array_equal(np.asarray(apply_mask(img, rel, severity=0)), np.asarray(img))
+    half = apply_mask(img, rel, fill=(0, 0, 0), severity=0.5)
+    assert 120 <= int(np.asarray(half)[0, 0, 0]) <= 135
     grid = patch_grid()
     assert len(grid) == 15
     assert grid[0] == {"layer": 0, "position_bucket": "image"}
@@ -921,6 +961,9 @@ def test_bf_swap_and_conf_fixtures():
     assert swap["schema"]["status"] == "runnable_v0"
     assert swap["reduction"]["n_cells"] == 1
     assert len(swap["samples"]) == 1
+    assert {cell["control"] for cell in swap["control_cells"]} == {
+        "self_swap", "reverse_swap", "random_pair_swap"
+    }
     conf = run_bf_conf_metric(
         wrapper,
         [sample],
@@ -1032,6 +1075,11 @@ def test_v2_sanity_and_validator_fixtures():
                 "clean_margin": -0.2,
                 "patched_margin": 0.3,
             }]}],
+            "control_cells": [
+                {"control": "self_swap", "swap_margin_shift": 0.0, "n_success": 1, "n_error": 0},
+                {"control": "reverse_swap", "swap_margin_shift": -0.1, "n_success": 1, "n_error": 0},
+                {"control": "random_pair_swap", "swap_margin_shift": 0.1, "n_success": 1, "n_error": 0},
+            ],
         },
         "bf_conf_calibrated_progression": {
             "model": "fake",
@@ -1040,7 +1088,7 @@ def test_v2_sanity_and_validator_fixtures():
         },
         "cf_stage_decay": {
             "model": "fake",
-            "reduction": {"late_retention": 0.9},
+            "reduction": {"late_delta": -0.4, "late_retention": 0.6},
             "families": {"mask": {"records": [
                 {"severity": 0.0, "stages": {"early": 1.0, "mid": 1.0, "late": 1.0}},
                 {"severity": 0.8, "stages": {"early": 0.8, "mid": 0.7, "late": 0.6}},
@@ -1065,7 +1113,7 @@ def test_v2_sanity_and_validator_fixtures():
         "bf_patch_answer_transfer": ("logprob_margin_shift", 0.2),
         "bf_swap_latent_replacement": ("swap_margin_shift", 0.3),
         "bf_conf_calibrated_progression": ("gold_logit_slope", 0.1),
-        "cf_stage_decay": ("late_retention", 0.9),
+        "cf_stage_decay": ("late_delta", -0.4),
     }
     model_fixture = ("qwen2_5_vl_3b", "qwen2_5_vl_7b", "lvr_7b")
     for model in model_fixture:
@@ -1075,11 +1123,17 @@ def test_v2_sanity_and_validator_fixtures():
             "bf_patch_answer_transfer": ("logprob_margin_shift", 0.2),
             "bf_swap_latent_replacement": ("swap_margin_shift", 0.3),
             "bf_conf_calibrated_progression": ("gold_logit_slope", 0.1),
-            "cf_stage_decay": ("late_retention", 0.9),
+            "cf_stage_decay": ("late_delta", -0.4),
         }.items():
             payload = {"reduction": {scalar[0]: scalar[1]}}
             if metric_id in {"bf_patch_answer_transfer", "bf_swap_latent_replacement"}:
                 payload.update({"n_paired": 1, "cells": [{"n_success": 1, "n_error": 0}]})
+            if metric_id == "bf_swap_latent_replacement":
+                payload["control_cells"] = [
+                    {"control": "self_swap", "swap_margin_shift": 0.0},
+                    {"control": "reverse_swap", "swap_margin_shift": -0.1},
+                    {"control": "random_pair_swap", "swap_margin_shift": 0.1},
+                ]
             (metrics_dir / f"{metric_id}__{model}.json").write_text(json.dumps({
                 "metric_id": metric_id,
                 "model": model,
@@ -1220,6 +1274,7 @@ def main():
     test_lvr_assistant_expansion()
     test_lvr_trace_position_extraction()
     test_lvr_trace_metric_payload()
+    test_lvr_trace_required_hard_fail()
     test_trace_recorder_fake_model()
     test_preregistration_and_bootstrap()
     test_v2_corruptions_and_patch_schema()

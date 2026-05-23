@@ -47,6 +47,10 @@ metrics:
   lvr_generation_trace:
     enabled: true
 
+trace_v2:
+  required: true
+  forbid_fallback: true
+
 validation:
   run_sanity: true
   fail_fast: true

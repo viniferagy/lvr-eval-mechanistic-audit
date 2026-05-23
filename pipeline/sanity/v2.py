@@ -164,7 +164,29 @@ def check_bf_patch_result(payload: dict, cfg: dict | None = None) -> dict:
 
 
 def check_bf_swap_result(payload: dict, cfg: dict | None = None) -> dict:
-    return _check_cells("bf_swap_latent_replacement", payload, cfg)
+    report = _check_cells("bf_swap_latent_replacement", payload, cfg)
+    checks = list(report.get("checks") or [])
+    control_cells = payload.get("control_cells") or []
+    controls = {cell.get("control") for cell in control_cells}
+    for required in ("self_swap", "reverse_swap", "random_pair_swap"):
+        checks.append(make_check(
+            f"{required}_recorded",
+            PASS if required in controls else FAIL,
+            controls=sorted(str(c) for c in controls if c),
+        ))
+    self_shifts = [
+        abs(float(cell.get("swap_margin_shift")))
+        for cell in control_cells
+        if cell.get("control") == "self_swap" and is_finite_scalar(cell.get("swap_margin_shift"))
+    ]
+    tolerance = float(_v2_cfg(cfg).get("self_swap_max_abs_shift", 0.05))
+    checks.append(make_check(
+        "self_swap_near_zero",
+        PASS if self_shifts and max(self_shifts) <= tolerance else FAIL,
+        max_abs_shift=max(self_shifts) if self_shifts else None,
+        tolerance=tolerance,
+    ))
+    return make_report("bf_swap_latent_replacement", payload.get("model", "unknown"), checks, "v2")
 
 
 def check_bf_conf_result(payload: dict, cfg: dict | None = None) -> dict:
@@ -180,7 +202,15 @@ def check_bf_conf_result(payload: dict, cfg: dict | None = None) -> dict:
 
 
 def check_cf_stage_result(payload: dict, cfg: dict | None = None) -> dict:
-    checks = _finite_reduction_checks(payload, ["late_retention"])
+    checks = _finite_reduction_checks(payload, ["late_delta"])
+    reduction = payload.get("reduction") or {}
+    if is_finite_scalar(reduction.get("late_retention")):
+        checks.append(make_check(
+            "late_retention_diagnostic_only",
+            PASS,
+            late_retention=reduction.get("late_retention"),
+            unstable_near_zero_baseline=reduction.get("late_retention_unstable_near_zero_baseline"),
+        ))
     for family, family_result in (payload.get("families") or {}).items():
         records = family_result.get("records") or []
         checks.append(make_check("family_min_severities", PASS if len(records) >= 2 else FAIL,

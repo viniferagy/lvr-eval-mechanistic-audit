@@ -118,6 +118,8 @@ bf_swap:
   layers: [7]
   position_buckets: ["query"]
   max_pairs: 50
+  controls: ["self_swap", "reverse_swap", "random_pair_swap"]
+  control_seed: 260523
 
 bf_conf:
   text_only_control: true
@@ -138,6 +140,7 @@ validation:
     min_pairs: 50
     max_error_ratio: 0.2
     allow_center_fallback: false
+    self_swap_max_abs_shift: 0.05
 
 output:
   root: "./runs"

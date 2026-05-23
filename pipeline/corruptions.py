@@ -86,9 +86,12 @@ def irrelevant_mask(
 
 def apply_mask(image: Image.Image, mask: BinaryMask, *, fill=(0, 0, 0), severity: float = 1.0) -> Image.Image:
     img = image.convert("RGB")
+    severity = float(severity)
     if severity <= 0:
         return img
-    arr = np.asarray(img).copy()
+    arr = np.asarray(img).astype(np.float32)
     m = np.asarray(mask.data, dtype=bool)
-    arr[m] = np.asarray(fill, dtype=arr.dtype)
-    return Image.fromarray(arr)
+    fill_arr = np.asarray(fill, dtype=np.float32)
+    alpha = min(1.0, severity)
+    arr[m] = (1.0 - alpha) * arr[m] + alpha * fill_arr
+    return Image.fromarray(np.clip(arr, 0, 255).astype("uint8"))

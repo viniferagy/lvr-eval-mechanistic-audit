@@ -21,7 +21,7 @@ PRIMARY_SCALARS = {
     "bf_patch_answer_transfer": "logprob_margin_shift",
     "bf_swap_latent_replacement": "swap_margin_shift",
     "bf_conf_calibrated_progression": "gold_logit_slope",
-    "cf_stage_decay": "late_retention",
+    "cf_stage_decay": "late_delta",
 }
 
 
@@ -73,6 +73,24 @@ def main() -> None:
                 fail(f"{metric_id} has zero successful patch cells")
             if total_error > total_success:
                 fail(f"{metric_id} has too many errors: {total_error}>{total_success}")
+            if metric_id == "bf_swap_latent_replacement":
+                control_cells = payload.get("control_cells") or []
+                controls = {cell.get("control") for cell in control_cells}
+                missing_controls = {"self_swap", "reverse_swap", "random_pair_swap"} - controls
+                if missing_controls:
+                    fail(f"bf_swap missing controls: {sorted(missing_controls)}")
+                self_shifts = [
+                    abs(float(cell.get("swap_margin_shift")))
+                    for cell in control_cells
+                    if cell.get("control") == "self_swap" and cell.get("swap_margin_shift") is not None
+                ]
+                if not self_shifts or max(self_shifts) > 0.05:
+                    fail(f"bf_swap self_swap control not near zero: {self_shifts}")
+        if metric_id == "cf_stage_decay":
+            if reduction.get("late_delta") is None:
+                fail("cf_stage_decay missing late_delta")
+            if reduction.get("late_retention_unstable_near_zero_baseline") and reduction.get("late_retention") is None:
+                fail("cf_stage_decay unstable retention flag set without diagnostic late_retention")
 
     missing = REQUIRED_METRICS - set(seen)
     if missing:

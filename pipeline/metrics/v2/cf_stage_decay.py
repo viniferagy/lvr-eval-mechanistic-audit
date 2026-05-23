@@ -19,7 +19,7 @@ def build_schema() -> dict:
     return {
         "metric_id": METRIC_ID,
         "stages": list(DEFAULT_STAGES),
-        "scalars": ["early_auc", "mid_auc", "late_auc", "late_retention"],
+        "scalars": ["early_auc", "mid_auc", "late_auc", "late_delta", "late_retention"],
         "status": "runnable_v0",
     }
 
@@ -109,10 +109,18 @@ def _family_reduction(records: list[dict]) -> dict:
             out[f"{stage}_rel_change"] = None
     clean_late = next((r.get("stages", {}).get("late") for r in records if float(r.get("severity", -1)) == 0.0), None)
     final_late = records[-1].get("stages", {}).get("late") if records else None
+    out["late_delta"] = (
+        float(final_late) - float(clean_late)
+        if clean_late is not None and final_late is not None
+        else None
+    )
     out["late_retention"] = (
         float(final_late) / (abs(float(clean_late)) + 1e-9)
         if clean_late is not None and final_late is not None
         else None
+    )
+    out["late_retention_unstable_near_zero_baseline"] = (
+        abs(float(clean_late)) < 1e-6 if clean_late is not None else None
     )
     return out
 
@@ -184,18 +192,31 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
                 if clean_late is not None and final_late is not None
                 else None
             )
+            late_delta = (
+                float(final_late) - float(clean_late)
+                if clean_late is not None and final_late is not None
+                else None
+            )
             sample_rows.append({
                 "id": sample_id,
                 "family": family,
                 "kind": "sample_retention",
-                "reduction": {"late_retention": late_retention},
+                "reduction": {
+                    "late_delta": late_delta,
+                    "late_retention": late_retention,
+                    "late_retention_unstable_near_zero_baseline": (
+                        abs(float(clean_late)) < 1e-6 if clean_late is not None else None
+                    ),
+                },
             })
 
     reductions = [fam["reduction"] for fam in family_results.values()]
     aggregate = {}
-    for key in sorted({k for reduction in reductions for k in reduction}):
+    unstable_key = "late_retention_unstable_near_zero_baseline"
+    for key in sorted({k for reduction in reductions for k in reduction if k != unstable_key}):
         vals = [float(r[key]) for r in reductions if r.get(key) is not None]
         aggregate[key] = float(np.mean(vals)) if vals else None
+    aggregate[unstable_key] = any(bool(r.get(unstable_key)) for r in reductions)
     aggregate["n_families"] = len(family_results)
     return {
         "model": model_tag,

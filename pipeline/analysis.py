@@ -304,27 +304,51 @@ def plot_generic_metric_results(metric_results: list[dict], out_dir: str):
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
 
+def _record_group_key(record: dict) -> str | None:
+    key = record.get("paired_id") or record.get("id")
+    return str(key) if key is not None else None
+
+
 def _numeric_sample_scalars(payload: dict) -> dict[str, list[float]]:
-    scalars: dict[str, list[float]] = {}
+    grouped: dict[str, dict[str, list[float]]] = {}
+    ungrouped: dict[str, list[float]] = {}
     samples = payload.get("samples")
     if not isinstance(samples, list):
-        return scalars
+        return {}
     for record in samples:
         if not isinstance(record, dict) or record.get("error") is not None:
             continue
+        group_key = _record_group_key(record)
         reduction = record.get("reduction")
         if isinstance(reduction, dict):
             for key, value in reduction.items():
+                if isinstance(value, (bool, np.bool_)):
+                    continue
                 try:
-                    scalars.setdefault(str(key), []).append(float(value))
+                    scalar = str(key)
+                    numeric = float(value)
                 except (TypeError, ValueError):
                     continue
+                if group_key is None:
+                    ungrouped.setdefault(scalar, []).append(numeric)
+                else:
+                    grouped.setdefault(scalar, {}).setdefault(group_key, []).append(numeric)
         for key in ("scalar", "value", "selectivity", "answer_transfer_rate"):
-            if key in record and key not in scalars:
+            if key in record and key not in grouped and key not in ungrouped:
                 try:
-                    scalars.setdefault(key, []).append(float(record[key]))
+                    numeric = float(record[key])
                 except (TypeError, ValueError):
                     continue
+                if group_key is None:
+                    ungrouped.setdefault(key, []).append(numeric)
+                else:
+                    grouped.setdefault(key, {}).setdefault(group_key, []).append(numeric)
+    scalars: dict[str, list[float]] = {
+        scalar: [float(np.mean(values)) for _group, values in sorted(groups.items())]
+        for scalar, groups in grouped.items()
+    }
+    for scalar, values in ungrouped.items():
+        scalars.setdefault(scalar, []).extend(values)
     return scalars
 
 

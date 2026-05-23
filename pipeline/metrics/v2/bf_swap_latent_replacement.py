@@ -1,6 +1,9 @@
 """BF-Swap controlled paired latent replacement."""
 from __future__ import annotations
 
+from dataclasses import replace
+import random
+
 import numpy as np
 
 from .bf_patch_answer_transfer import patch_grid, patch_one_pair
@@ -18,6 +21,7 @@ def build_schema() -> dict:
         "metric_id": METRIC_ID,
         "grid": patch_grid(DEFAULT_LAYERS, DEFAULT_POSITION_BUCKETS),
         "scalars": ["swap_margin_shift", "swap_answer_transfer_rate", "n_paired"],
+        "controls": ["self_swap", "reverse_swap", "random_pair_swap"],
         "status": "runnable_v0",
     }
 
@@ -53,9 +57,11 @@ def _cell_summary(cell: dict, records: list[dict]) -> dict:
     }
 
 
-def _flatten_sample_records(cells: list[dict]) -> list[dict]:
+def _flatten_sample_records(cells: list[dict], *, include_controls: bool = False) -> list[dict]:
     out = []
     for cell in cells:
+        if cell.get("control") and not include_controls:
+            continue
         for record in cell.get("records", []):
             if record.get("error") is not None:
                 continue
@@ -73,10 +79,11 @@ def _flatten_sample_records(cells: list[dict]) -> list[dict]:
 
 
 def reduce_cells(cells: list[dict]) -> dict | None:
-    shifts = [float(c["swap_margin_shift"]) for c in cells if c.get("swap_margin_shift") is not None]
+    primary_cells = [cell for cell in cells if not cell.get("control")]
+    shifts = [float(c["swap_margin_shift"]) for c in primary_cells if c.get("swap_margin_shift") is not None]
     transfers = [
         float(c["swap_answer_transfer_rate"])
-        for c in cells
+        for c in primary_cells
         if c.get("swap_answer_transfer_rate") is not None
     ]
     if not shifts and not transfers:
@@ -84,15 +91,87 @@ def reduce_cells(cells: list[dict]) -> dict | None:
     return {
         "swap_margin_shift": _mean(shifts),
         "swap_answer_transfer_rate": _mean(transfers),
-        "n_paired": int(max((c.get("n_paired", 0) for c in cells), default=0)),
-        "n_cells": len(cells),
+        "n_paired": int(max((c.get("n_paired", 0) for c in primary_cells), default=0)),
+        "n_cells": len(primary_cells),
     }
+
+
+def _self_swap_sample(sample):
+    return replace(sample, counterfactual_image=sample.image, counterfactual_answer=sample.answer)
+
+
+def _reverse_swap_sample(sample):
+    return replace(
+        sample,
+        image=sample.counterfactual_image,
+        answer=sample.counterfactual_answer,
+        counterfactual_image=sample.image,
+        counterfactual_answer=sample.answer,
+    )
+
+
+def _random_pair_sample(sample, source_sample):
+    return replace(
+        sample,
+        counterfactual_image=source_sample.counterfactual_image,
+        counterfactual_answer=source_sample.counterfactual_answer,
+        task_metadata={
+            **(sample.task_metadata or {}),
+            "random_pair_source_id": source_sample.id,
+            "random_pair_source_paired_id": source_sample.paired_id,
+        },
+    )
+
+
+def _control_samples(control: str, paired: list, seed: int) -> list:
+    if control == "self_swap":
+        return [_self_swap_sample(sample) for sample in paired]
+    if control == "reverse_swap":
+        return [_reverse_swap_sample(sample) for sample in paired]
+    if control == "random_pair_swap":
+        if len(paired) < 2:
+            return []
+        rng = random.Random(seed)
+        shuffled = list(paired)
+        rng.shuffle(shuffled)
+        if any(a.id == b.id for a, b in zip(paired, shuffled)):
+            shuffled = shuffled[1:] + shuffled[:1]
+        return [_random_pair_sample(sample, source) for sample, source in zip(paired, shuffled)]
+    raise ValueError(f"unknown BF-Swap control: {control}")
+
+
+def _run_cell_records(wrapper, paired: list, cell: dict) -> list[dict]:
+    records = []
+    for sample in paired:
+        try:
+            records.append(patch_one_pair(
+                wrapper,
+                sample,
+                layer=cell["layer"],
+                position_bucket=cell["position_bucket"],
+            ))
+        except Exception as exc:  # noqa: BLE001
+            records.append({
+                "id": sample.id,
+                "paired_id": sample.paired_id,
+                "layer": cell["layer"],
+                "position_bucket": cell["position_bucket"],
+                "source_answer": str(sample.counterfactual_answer),
+                "target_answer": str(sample.answer),
+                "error": repr(exc),
+            })
+    return records
 
 
 def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
     local = _cfg(cfg)
     layers = [int(v) for v in local.get("layers", DEFAULT_LAYERS)]
     buckets = [str(v) for v in local.get("position_buckets", DEFAULT_POSITION_BUCKETS)]
+    controls = [str(v) for v in local.get(
+        "controls",
+        ["self_swap", "reverse_swap", "random_pair_swap"],
+    )]
+    control_seed = int(local.get("control_seed", local.get("seed", 260523)))
     paired = [
         sample for sample in samples
         if sample.counterfactual_image is not None and sample.counterfactual_answer is not None
@@ -103,26 +182,18 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
 
     cells = []
     for cell in patch_grid(layers, buckets):
-        records = []
-        for sample in paired:
-            try:
-                records.append(patch_one_pair(
-                    wrapper,
-                    sample,
-                    layer=cell["layer"],
-                    position_bucket=cell["position_bucket"],
-                ))
-            except Exception as exc:  # noqa: BLE001
-                records.append({
-                    "id": sample.id,
-                    "paired_id": sample.paired_id,
-                    "layer": cell["layer"],
-                    "position_bucket": cell["position_bucket"],
-                    "source_answer": str(sample.counterfactual_answer),
-                    "target_answer": str(sample.answer),
-                    "error": repr(exc),
-                })
+        records = _run_cell_records(wrapper, paired, cell)
         cells.append(_cell_summary(cell, records))
+
+    control_cells = []
+    for control in controls:
+        control_paired = _control_samples(control, paired, control_seed)
+        for cell in patch_grid(layers, buckets):
+            records = _run_cell_records(wrapper, control_paired, cell)
+            control_cells.append({
+                **_cell_summary({**cell, "control": control}, records),
+                "control": control,
+            })
 
     return {
         "model": model_tag,
@@ -131,11 +202,14 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
             "layers": layers,
             "position_buckets": buckets,
             "max_pairs": max_pairs,
+            "controls": controls,
+            "control_seed": control_seed,
             "source": "counterfactual",
             "target": "clean",
             "primary": "paired_hidden_state_swap",
         },
         "cells": cells,
+        "control_cells": control_cells,
         "samples": _flatten_sample_records(cells),
         "reduction": reduce_cells(cells),
         "n_paired": len(paired),

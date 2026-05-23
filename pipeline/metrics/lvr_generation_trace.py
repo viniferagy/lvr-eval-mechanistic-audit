@@ -10,6 +10,9 @@ LEGACY_NAME = "lvr_trace"
 
 def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
     audit_cfg = cfg.get("audit", {})
+    trace_cfg = cfg.get("trace_v2", {}) or {}
+    trace_required = bool(trace_cfg.get("required", False))
+    forbid_fallback = bool(trace_cfg.get("forbid_fallback", trace_required))
     out = []
     for s in samples:
         try:
@@ -20,6 +23,13 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
                 decoding_strategy=audit_cfg.get("lvr_decoding_strategy", "steps"),
                 lvr_steps=audit_cfg.get("lvr_steps", 16),
             )
+            if trace_required:
+                if trace.get("trace_quality") != "instrumented_sparse_v0":
+                    raise RuntimeError(f"trace v2 required but trace_quality={trace.get('trace_quality')!r}")
+                if forbid_fallback and trace.get("trace_v2_error"):
+                    raise RuntimeError(f"trace v2 fallback forbidden: {trace.get('trace_v2_error')}")
+                if forbid_fallback and trace.get("missing_modules"):
+                    raise RuntimeError(f"trace v2 missing modules: {trace.get('missing_modules')}")
             out.append({
                 "id": s.id,
                 "generated_text": trace.get("generated_text"),
@@ -45,6 +55,8 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
                 "notes": trace.get("notes"),
             })
         except Exception as exc:  # noqa: BLE001
+            if trace_required:
+                raise
             out.append({"id": s.id, "error": repr(exc)})
     valid = [row for row in out if row.get("error") is None]
     n_instrumented = sum(1 for row in valid if row.get("trace_quality") == "instrumented_sparse_v0")
