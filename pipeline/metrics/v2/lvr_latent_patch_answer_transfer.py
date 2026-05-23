@@ -300,11 +300,21 @@ def run_one_pair(wrapper, sample, cfg: dict) -> dict:
         selected_items = _select_patch_state_items(source_trace, patch_steps)
         if not selected_items:
             raise RuntimeError("source trace captured no selected patchable latent states")
+        selected_step_ids = [
+            int(item["step_index"])
+            for item in selected_items
+            if item.get("step_index") is not None
+        ]
         patched_trace = wrapper.adapter.generate_with_trace(
             wrapper,
             target.image,
             target.question,
-            **_trace_kwargs(local, audit_cfg, patch_states=[item["tensor"] for item in selected_items], patch_steps=None),
+            **_trace_kwargs(
+                local,
+                audit_cfg,
+                patch_states=[item["tensor"] for item in selected_items],
+                patch_steps=selected_step_ids or None,
+            ),
         )
         patched_summary = _patch_result(
             patched_trace=patched_trace,

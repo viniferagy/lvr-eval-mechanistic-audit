@@ -62,6 +62,8 @@ from pipeline.sanity import (
     save_sanity_reports,
 )
 from tools.validate_spd_range import main as validate_spd_range_main
+from tools.validate_capacity_sweep import main as validate_capacity_sweep_main
+from tools.build_evidence_pack import main as build_evidence_pack_main
 from tools.validate_w3_latent import main as validate_w3_latent_main
 from tools.validate_w4_stepsweep import main as validate_w4_stepsweep_main
 
@@ -1443,6 +1445,82 @@ def test_w4_latent_step_sweep_fixtures():
     print("  W4 latent step sweep sanity and validator accept/reject fixtures -> ok")
 
 
+def test_w5_w8_tooling_fixtures():
+    print("\n== 10i4. W5-W8 capacity/evidence tooling fixtures ==")
+
+    def write_latent_run(root: Path, n_steps: int):
+        metrics_dir = root / "metrics"
+        sanity_dir = root / "sanity"
+        metrics_dir.mkdir(parents=True)
+        sanity_dir.mkdir()
+        reduction = {
+            "latent_answer_transfer_rate": 0.5,
+            "best_step_transfer_rate": 0.6,
+            "best_step_index": n_steps - 1,
+            "step_transfer_auc": 0.55,
+            "last_step_transfer_rate": 0.5,
+            "n_steps_evaluated": n_steps,
+            "n_paired": 1,
+            "n_success": 1,
+            "n_error": 0,
+        }
+        payload = {
+            "model": "lvr_7b",
+            "n_paired": 1,
+            "reduction": reduction,
+        }
+        (metrics_dir / "lvr_latent_patch_answer_transfer_lvr_7b.json").write_text(json.dumps({
+            "metric_id": "lvr_latent_patch_answer_transfer",
+            "model": "lvr_7b",
+            "payload": payload,
+        }))
+        (root / "summary_with_ci.json").write_text(json.dumps([
+            {"metric_id": "lvr_latent_patch_answer_transfer", "model": "lvr_7b", "scalar": scalar, "n": 1}
+            for scalar in ["best_step_transfer_rate", "step_transfer_auc", "last_step_transfer_rate"]
+        ]))
+        (sanity_dir / "summary_sanity.json").write_text(json.dumps({"overall_status": "pass"}))
+        (root / "prereg.lock.json").write_text(json.dumps({"manifest_version": "fixture"}))
+
+    run_a = Path(tempfile.mkdtemp(prefix="w5_capacity_a_"))
+    run_b = Path(tempfile.mkdtemp(prefix="w5_capacity_b_"))
+    write_latent_run(run_a, 2)
+    write_latent_run(run_b, 4)
+
+    import sys
+
+    old_argv = sys.argv
+    try:
+        sys.argv = [
+            "validate_capacity_sweep.py",
+            str(run_a),
+            str(run_b),
+            "--min-pairs",
+            "1",
+            "--min-steps",
+            "1",
+        ]
+        validate_capacity_sweep_main()
+        out_path = Path(tempfile.mkdtemp(prefix="w8_pack_")) / "pack.md"
+        sys.argv = [
+            "build_evidence_pack.py",
+            "--out",
+            str(out_path),
+            "--w3",
+            str(run_a),
+            "--w4",
+            str(run_b),
+            "--w5",
+            str(run_a),
+            str(run_b),
+        ]
+        build_evidence_pack_main()
+        assert out_path.is_file()
+        assert "W5 Capacity Sweep" in out_path.read_text(encoding="utf-8")
+    finally:
+        sys.argv = old_argv
+    print("  capacity sweep validator + evidence pack builder -> ok")
+
+
 def test_adapter_probe_catalog():
     print("\n== 10j. adapter probe catalog ==")
     probes = list_adapter_probes()
@@ -1564,6 +1642,7 @@ def main():
     test_v2_sanity_and_validator_fixtures()
     test_w3_latent_sanity_and_validator_fixtures()
     test_w4_latent_step_sweep_fixtures()
+    test_w5_w8_tooling_fixtures()
     test_adapter_probe_catalog()
     test_bf1_does_not_cache_gpu_inputs_static()
     test_end_to_end()

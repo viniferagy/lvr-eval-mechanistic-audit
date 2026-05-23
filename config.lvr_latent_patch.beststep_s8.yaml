@@ -1,0 +1,74 @@
+models:
+  lvr_7b:
+    name: "LVR-7B"
+    path: "./models/LVR-7B"
+    arch: "lvr_qwen2_5_vl_traced"
+    lvr_source_path: "../lvr"
+    layer_path: null
+    image_pad_token: "<|image_pad|>"
+    lvr_start_token: "<|lvr_start|>"
+    lvr_token: "<|lvr|>"
+    lvr_latent_end_token: "<|lvr_latent_end|>"
+    lvr_end_token: "<|lvr_end|>"
+audit:
+  mode: "generation_trace"
+  query_target: "auto"
+  lvr_expansion_mode: "fixed"
+  lvr_num_tokens: 16
+  lvr_include_latent_end_token: false
+  allow_lvr_fallback_to_answer_probe: false
+  allow_synthetic_lvr_assistant: false
+  allow_multiple_lvr_placeholders: false
+  lvr_decoding_strategy: "steps"
+  lvr_steps: 8
+  max_image_side: 384
+  max_image_pixels: 147456
+data:
+  source_type: "spd_faith"
+  jsonl_path: "./data/spd_faith_hf/manifest.jsonl"
+  image_root: "./data/spd_faith_hf/images"
+  skip_missing_images: false
+  require_region_or_bbox: true
+  max_samples: 50
+  shuffle_seed: 260526
+  field_map:
+    id: ["id"]
+    paired_id: ["paired_id"]
+    image: ["image_clean"]
+    counterfactual_image: ["image_counterfactual"]
+    question: ["question"]
+    answer: ["gold_answer_clean", "answer"]
+    counterfactual_answer: ["gold_answer_counterfactual", "counterfactual_answer"]
+    rationale: ["rationale"]
+    region_mask: ["region_mask"]
+    bboxes: ["bboxes"]
+preregistration:
+  enabled: true
+  manifest_path: "prereg/manifest.yaml"
+inference:
+  dtype: "bfloat16"
+  device: "cuda:0"
+metrics:
+  lvr_latent_patch_answer_transfer:
+    enabled: true
+trace_v2:
+  required: true
+  forbid_fallback: true
+lvr_latent_patch:
+  max_pairs: 50
+  patch_steps: ["4"]
+  patch_tensor: "output_last_position_hidden_state"
+  intervention_site: "forward_pre.last_position_hidden_state"
+  decoding_strategy: "steps"
+  lvr_steps: 8
+  max_new_tokens: 64
+  max_captured_tensors: 12
+validation:
+  run_sanity: true
+  fail_fast: true
+  w3:
+    min_pairs: 50
+    max_error_ratio: 0.2
+output:
+  root: "./runs"
+  run_name: null
