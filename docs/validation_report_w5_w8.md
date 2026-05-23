@@ -101,4 +101,77 @@ W8 evidence pack:
 
 ## Results
 
-Results will be populated from the W5-W8 run artifacts after execution.
+### W5 Capacity Sweep
+
+All four capacity runs passed sanity and validator checks.
+
+| run | n_paired | n_success | n_steps_evaluated | best_step_index | best_step_transfer_rate | step_transfer_auc | last_step_transfer_rate |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `w5_lvr_capacity_s2_n50` | 50 | 50 | 2 | 3 | 0.44 | 0.420000 | 0.44 |
+| `w5_lvr_capacity_s4_n50` | 50 | 50 | 4 | 4 | 0.52 | 0.466667 | 0.42 |
+| `w5_lvr_capacity_s8_n50` | 50 | 50 | 6 | 4 | 0.44 | 0.424000 | 0.42 |
+| `w5_lvr_capacity_s16_n50` | 50 | 50 | 10 | 4 | 0.48 | 0.444444 | 0.46 |
+
+Capacity sweep validator:
+
+```text
+CAPACITY SWEEP VALIDATION PASSED
+```
+
+### W6 Best-Step Replication
+
+Run dir: `runs/w6_lvr_beststep4_s8_n50`
+
+| field | value |
+|---|---:|
+| n_paired | 50 |
+| n_success | 50 |
+| n_error | 0 |
+| patch step | 4 |
+| latent_answer_transfer_rate | 0.60 |
+| best_step_transfer_rate | 0.60 |
+| step_transfer_auc | 0.60 |
+| sanity overall_status | pass |
+
+Validator:
+
+```text
+W3 LATENT VALIDATION PASSED
+```
+
+### W7 SPD Regression Scale-Up
+
+Run dir: `runs/w7_spd_scale_m0_m1_m2_n200`
+
+Artifacts:
+
+| artifact | result |
+|---|---:|
+| metric JSON files | 18 |
+| sanity reports | 18 pass, 0 warn, 0 fail |
+| summary_with_ci rows | 66 |
+| paired BF-Patch n_success/n_error | 200/0 per model |
+| paired BF-Swap n_success/n_error | 200/0 per model |
+
+Primary reductions:
+
+| metric | qwen2_5_vl_3b | qwen2_5_vl_7b | lvr_7b |
+|---|---:|---:|---:|
+| PF-A selectivity | 0.211966 | 0.192499 | 0.179774 |
+| PF-B native_alignment | 0.715810 | 0.688120 | 0.785818 |
+| BF-Patch logprob_margin_shift | -0.002500 | -0.003750 | -0.006797 |
+| BF-Swap swap_margin_shift | 0.003125 | -0.012500 | -0.018828 |
+| BF-Conf gold_logit_slope | 0.194958 | 0.343618 | 0.069962 |
+| CF-Stage late_delta | 1.804084 | 2.215903 | 1.318340 |
+
+Validator:
+
+```text
+SPD RANGE VALIDATION PASSED
+```
+
+### W8 Evidence Pack
+
+Generated: `docs/evidence_pack_w5_w8.md`
+
+The evidence pack summarizes W3-W7 gates and restates the scope boundary: W3-W6 are true inference-time LVR hidden-feedback interventions on constrained SPD-Faith answers; W7 is query-span regression evidence across Qwen/LVR weights.
