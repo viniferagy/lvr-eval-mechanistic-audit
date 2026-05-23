@@ -20,6 +20,18 @@ def _max_error_ratio(cfg: dict | None) -> float:
     return float(_v2_cfg(cfg).get("max_error_ratio", 0.2))
 
 
+def _w3_cfg(cfg: dict | None) -> dict:
+    return (((cfg or {}).get("validation") or {}).get("w3") or {})
+
+
+def _w3_min_pairs(cfg: dict | None) -> int:
+    return int(_w3_cfg(cfg).get("min_pairs", 50))
+
+
+def _w3_max_error_ratio(cfg: dict | None) -> float:
+    return float(_w3_cfg(cfg).get("max_error_ratio", 0.2))
+
+
 def _allow_center_fallback(cfg: dict | None) -> bool:
     return bool(_v2_cfg(cfg).get("allow_center_fallback", False))
 
@@ -219,3 +231,74 @@ def check_cf_stage_result(payload: dict, cfg: dict | None = None) -> dict:
             any_finite = any(is_finite_scalar((rec.get("stages") or {}).get(stage)) for rec in records)
             checks.append(make_check(f"{family}_{stage}_finite", PASS if any_finite else FAIL))
     return make_report("cf_stage_decay", payload.get("model", "unknown"), checks, "v2")
+
+
+def check_lvr_latent_patch_result(payload: dict, cfg: dict | None = None) -> dict:
+    checks = _finite_reduction_checks(payload, ["latent_answer_transfer_rate"])
+    reduction = payload.get("reduction") or {}
+    n_paired = int(payload.get("n_paired") or reduction.get("n_paired") or 0)
+    min_pairs = _w3_min_pairs(cfg)
+    checks.append(make_check(
+        "min_pairs",
+        PASS if n_paired >= min_pairs else FAIL,
+        n_paired=n_paired,
+        min_pairs=min_pairs,
+    ))
+    n_success = int(reduction.get("n_success") or 0)
+    n_error = int(reduction.get("n_error") or 0)
+    n_patch_applied = int(reduction.get("n_patch_applied") or 0)
+    n_with_lvr_mode = int(reduction.get("n_with_lvr_mode") or 0)
+    n_with_captured_state = int(reduction.get("n_with_captured_state") or 0)
+    checks.append(make_check("success_present", PASS if n_success > 0 else FAIL, n_success=n_success))
+    checks.append(make_check(
+        "error_ratio",
+        PASS if n_error <= max(1, n_success) * _w3_max_error_ratio(cfg) else FAIL,
+        n_success=n_success,
+        n_error=n_error,
+        max_error_ratio=_w3_max_error_ratio(cfg),
+    ))
+    checks.append(make_check(
+        "patch_applied_min_pairs",
+        PASS if n_patch_applied >= min_pairs else FAIL,
+        n_patch_applied=n_patch_applied,
+        min_pairs=min_pairs,
+    ))
+    checks.append(make_check(
+        "lvr_mode_min_pairs",
+        PASS if n_with_lvr_mode >= min_pairs else FAIL,
+        n_with_lvr_mode=n_with_lvr_mode,
+        min_pairs=min_pairs,
+    ))
+    checks.append(make_check(
+        "captured_state_min_pairs",
+        PASS if n_with_captured_state >= min_pairs else FAIL,
+        n_with_captured_state=n_with_captured_state,
+        min_pairs=min_pairs,
+    ))
+
+    valid_trace = 0
+    answer_records = 0
+    shape_records = 0
+    for record in payload.get("samples") or []:
+        if record.get("error") is not None:
+            continue
+        if (
+            record.get("trace_quality") == "instrumented_sparse_v0"
+            and record.get("source_trace_quality") == "instrumented_sparse_v0"
+            and not record.get("trace_v2_error")
+            and record.get("missing_modules") == []
+        ):
+            valid_trace += 1
+        if record.get("clean_answer") is not None and record.get("patched_answer") is not None:
+            answer_records += 1
+        shapes = record.get("captured_state_shapes") or []
+        patched_shapes = record.get("patched_captured_state_shapes") or []
+        if shapes and patched_shapes and shapes[-1] and patched_shapes[-1] and shapes[-1][-1] == patched_shapes[-1][-1]:
+            shape_records += 1
+    checks.append(make_check("instrumented_trace_records", PASS if valid_trace >= min_pairs else FAIL,
+                             valid_trace=valid_trace, min_pairs=min_pairs))
+    checks.append(make_check("generated_answers_recorded", PASS if answer_records >= min_pairs else FAIL,
+                             answer_records=answer_records, min_pairs=min_pairs))
+    checks.append(make_check("captured_shape_match", PASS if shape_records >= min_pairs else FAIL,
+                             shape_records=shape_records, min_pairs=min_pairs))
+    return make_report("lvr_latent_patch_answer_transfer", payload.get("model", "unknown"), checks, "w3")

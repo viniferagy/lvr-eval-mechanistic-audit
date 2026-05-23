@@ -37,6 +37,13 @@ primary_metrics:
     primary_scalar: "late_delta"
     version: "0.2-w2-final-gate"
     status: "runnable_v0_validated"
+experimental_metrics:
+  - metric_id: "lvr_latent_patch_answer_transfer"
+    family: "BF"
+    primary_scalar: "latent_answer_transfer_rate"
+    version: "0.3-w3-latent-gate"
+    status: "runnable_w3_gate"
+    scope: "true_lvr_generation_time_hidden_feedback_intervention"
 statistics:
   bootstrap:
     ci: 0.95

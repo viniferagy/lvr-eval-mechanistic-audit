@@ -17,6 +17,7 @@ from .v2 import (
     check_bf_patch_result,
     check_bf_swap_result,
     check_cf_stage_result,
+    check_lvr_latent_patch_result,
     check_pf_a_result,
     check_pf_b_result,
     check_trace_v2_result,
@@ -105,6 +106,8 @@ def run_sanity_for_metric_result(metric_id: str, result: dict,
         return [check_bf_conf_result(result, cfg)]
     if metric_id == "cf_stage_decay":
         return [check_cf_stage_result(result, cfg)]
+    if metric_id == "lvr_latent_patch_answer_transfer":
+        return [check_lvr_latent_patch_result(result, cfg)]
     return []
 
 

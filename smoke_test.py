@@ -42,6 +42,10 @@ from pipeline.metrics.v2.bf_patch_answer_transfer import (
 from pipeline.metrics.v2.bf_conf_calibrated_progression import run as run_bf_conf_metric
 from pipeline.metrics.v2.bf_swap_latent_replacement import run as run_bf_swap_metric
 from pipeline.metrics.v2.cf_stage_decay import stage_reduce
+from pipeline.metrics.v2.lvr_latent_patch_answer_transfer import (
+    parse_candidate,
+    reduce_records as reduce_w3_latent_records,
+)
 from pipeline.metrics.v2.pf_b_patch_alignment import run as run_pf_b_metric
 from pipeline.metrics.lvr_generation_trace import run as run_lvr_trace_metric
 from pipeline.preregistration import build_lock_payload, hash_manifest, load_manifest
@@ -58,6 +62,7 @@ from pipeline.sanity import (
     save_sanity_reports,
 )
 from tools.validate_spd_range import main as validate_spd_range_main
+from tools.validate_w3_latent import main as validate_w3_latent_main
 
 
 def make_img(seed=0):
@@ -613,6 +618,64 @@ def test_trace_recorder_fake_model():
     print("  TraceRecorder captures/removes sparse hooks -> ok")
 
 
+def test_trace_recorder_tensor_capture_and_patch():
+    print("\n== 10b2. LVR trace v3 tensor capture + patch ==")
+    try:
+        import torch
+        import torch.nn as nn
+    except ImportError:
+        print("  torch unavailable; skip trace recorder tensor capture")
+        return
+
+    class Output:
+        def __init__(self, hidden):
+            self.last_position_hidden_state = hidden
+            self.logits = torch.zeros(1, 1, 4)
+
+    class FakeModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lm_head = nn.Linear(4, 4)
+            self.model = nn.Module()
+            self.model.language_model = nn.Module()
+            self.model.language_model.embed_tokens = nn.Embedding(8, 4)
+            self.model.language_model.norm = nn.LayerNorm(4)
+            self.model.visual = nn.Module()
+            self.model.visual.merger = nn.Linear(4, 4)
+
+        def forward(self, input_ids=None, lvr_mode_switch=None, last_position_hidden_state=None, **_):
+            hidden = torch.ones(1, 4)
+            if last_position_hidden_state is not None:
+                hidden = last_position_hidden_state + 1.0
+            self.lm_head(hidden)
+            return Output(hidden)
+
+    model = FakeModel()
+    model.layers = nn.ModuleList([nn.Linear(4, 4) for _ in range(4)])
+    wrapper = SimpleNamespace(model=model, layers=model.layers, n_layers=len(model.layers))
+    with TraceRecorder(wrapper, capture_tensors=True) as rec:
+        model(input_ids=torch.tensor([[1]]), lvr_mode_switch=torch.tensor([False]))
+        model(
+            input_ids=torch.tensor([[2]]),
+            lvr_mode_switch=torch.tensor([True]),
+            last_position_hidden_state=torch.zeros(1, 4),
+        )
+    summary = rec.summary()
+    assert summary["n_captured_latent_states"] >= 2
+    assert summary["hidden_size"] == 4
+
+    patch_state = [torch.full((1, 4), 5.0)]
+    with TraceRecorder(wrapper, capture_tensors=True, patch_states=patch_state, patch_steps={0}) as patched:
+        out = model(
+            input_ids=torch.tensor([[2]]),
+            lvr_mode_switch=torch.tensor([True]),
+            last_position_hidden_state=torch.zeros(1, 4),
+        )
+    assert patched.summary()["n_patch_applied"] == 1
+    assert float(out.last_position_hidden_state[0, 0]) == 6.0
+    print("  TraceRecorder captures latent tensors and patches selected steps -> ok")
+
+
 def test_preregistration_and_bootstrap():
     print("\n== 10c. preregistration + bootstrap CI ==")
     manifest = load_manifest("prereg/manifest.yaml")
@@ -655,6 +718,9 @@ def test_preregistration_and_bootstrap():
         scalars = set(schema.get("scalars") or [])
         assert item["primary_scalar"] in scalars, item
         assert item["status"] == "runnable_v0_validated"
+    exp = {item["metric_id"]: item for item in manifest.get("experimental_metrics", [])}
+    assert exp["lvr_latent_patch_answer_transfer"]["primary_scalar"] == "latent_answer_transfer_rate"
+    assert get_metric("latent_patch").metric_id == "lvr_latent_patch_answer_transfer"
     trace_cfg = yaml.safe_load(Path("config.trace_v2.yaml").read_text())
     assert trace_cfg["models"]["lvr_7b"]["arch"] == "lvr_qwen2_5_vl_traced"
     assert trace_cfg["metrics"]["lvr_generation_trace"]["enabled"] is True
@@ -1165,6 +1231,90 @@ def test_v2_sanity_and_validator_fixtures():
     print("  v2 sanity dispatch and range validator accept/reject fixtures -> ok")
 
 
+def test_w3_latent_sanity_and_validator_fixtures():
+    print("\n== 10i2. W3 latent patch sanity + validator fixtures ==")
+    assert parse_candidate("<|im_start|> Modified.") == "modified"
+    reduction = reduce_w3_latent_records([
+        {
+            "answer_transferred": True,
+            "latent_margin_shift": 0.5,
+            "n_patch_applied": 1,
+            "n_lvr_mode_steps": 2,
+            "n_captured_latent_states": 2,
+        }
+    ], 1)
+    assert reduction["latent_answer_transfer_rate"] == 1.0
+    payload = {
+        "model": "lvr_7b",
+        "n_paired": 1,
+        "reduction": {
+            "latent_answer_transfer_rate": 1.0,
+            "latent_margin_shift": 0.5,
+            "n_paired": 1,
+            "n_success": 1,
+            "n_error": 0,
+            "n_patch_applied": 1,
+            "n_with_lvr_mode": 1,
+            "n_with_captured_state": 1,
+        },
+        "samples": [{
+            "id": "p0",
+            "paired_id": "p0",
+            "trace_quality": "instrumented_sparse_v0",
+            "source_trace_quality": "instrumented_sparse_v0",
+            "missing_modules": [],
+            "trace_v2_error": None,
+            "clean_answer": "original",
+            "patched_answer": "modified",
+            "captured_state_shapes": [[1, 4]],
+            "patched_captured_state_shapes": [[1, 4]],
+            "reduction": {"latent_answer_transfer_rate": 1.0, "latent_margin_shift": 0.5},
+        }],
+    }
+    cfg = {"validation": {"w3": {"min_pairs": 1, "max_error_ratio": 0.2}}}
+    reports = run_sanity_for_metric_result("lvr_latent_patch_answer_transfer", payload, cfg)
+    assert reports and not has_failed_checks(reports)
+    bad = dict(payload)
+    bad["samples"] = [{**payload["samples"][0], "trace_quality": "approximate_legacy"}]
+    assert has_failed_checks(run_sanity_for_metric_result("lvr_latent_patch_answer_transfer", bad, cfg))
+
+    run_dir = Path(tempfile.mkdtemp(prefix="w3_latent_validator_"))
+    metrics_dir = run_dir / "metrics"
+    sanity_dir = run_dir / "sanity"
+    metrics_dir.mkdir()
+    sanity_dir.mkdir()
+    (run_dir / "prereg.lock.json").write_text(json.dumps({"manifest_version": "fixture"}))
+    (metrics_dir / "lvr_latent_patch_answer_transfer_lvr_7b.json").write_text(json.dumps({
+        "metric_id": "lvr_latent_patch_answer_transfer",
+        "model": "lvr_7b",
+        "payload": payload,
+    }))
+    (run_dir / "summary_with_ci.json").write_text(json.dumps([{
+        "metric_id": "lvr_latent_patch_answer_transfer",
+        "model": "lvr_7b",
+        "scalar": "latent_answer_transfer_rate",
+        "n": 1,
+    }]))
+    (sanity_dir / "summary_sanity.json").write_text(json.dumps({"overall_status": "pass"}))
+    import sys
+
+    old_argv = sys.argv
+    try:
+        sys.argv = ["validate_w3_latent.py", str(run_dir), "--min-pairs", "1"]
+        validate_w3_latent_main()
+        low_dir = Path(tempfile.mkdtemp(prefix="w3_latent_validator_low_"))
+        (low_dir / "metrics").mkdir()
+        sys.argv = ["validate_w3_latent.py", str(low_dir), "--min-pairs", "1"]
+        try:
+            validate_w3_latent_main()
+            raise AssertionError("W3 validator should reject missing metric")
+        except SystemExit as exc:
+            assert "FAIL:" in str(exc)
+    finally:
+        sys.argv = old_argv
+    print("  W3 latent sanity and validator accept/reject fixtures -> ok")
+
+
 def test_adapter_probe_catalog():
     print("\n== 10j. adapter probe catalog ==")
     probes = list_adapter_probes()
@@ -1276,6 +1426,7 @@ def main():
     test_lvr_trace_metric_payload()
     test_lvr_trace_required_hard_fail()
     test_trace_recorder_fake_model()
+    test_trace_recorder_tensor_capture_and_patch()
     test_preregistration_and_bootstrap()
     test_v2_corruptions_and_patch_schema()
     test_pf_a_metric_fixture()
@@ -1283,6 +1434,7 @@ def main():
     test_bf_swap_and_conf_fixtures()
     test_cf_stage_and_pf_b_fixtures()
     test_v2_sanity_and_validator_fixtures()
+    test_w3_latent_sanity_and_validator_fixtures()
     test_adapter_probe_catalog()
     test_bf1_does_not_cache_gpu_inputs_static()
     test_end_to_end()

@@ -68,8 +68,15 @@ class TraceRecorder:
     """Context manager that records sparse generation-time hook metadata."""
 
     wrapper: Any
+    capture_tensors: bool = False
+    max_captured_tensors: int = 16
+    capture_device_policy: str = "cpu_float32"
+    patch_states: list[Any] | None = None
+    patch_steps: set[int] | None = None
     handles: list[Any] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
+    captured_states: list[dict[str, Any]] = field(default_factory=list)
+    n_patch_applied: int = 0
     sampled_layers: list[int] = field(default_factory=list)
     module_paths: dict[str, str] = field(default_factory=dict)
     missing_modules: list[str] = field(default_factory=list)
@@ -92,6 +99,52 @@ class TraceRecorder:
         event["event_index"] = len(self.events)
         self.events.append(event)
 
+    def _should_capture_tensor(self, lvr_mode, tensor) -> bool:
+        if not self.capture_tensors or tensor is None or not torch.is_tensor(tensor):
+            return False
+        if len(self.captured_states) >= int(self.max_captured_tensors):
+            return False
+        mode_values = _tensor_bool_list(lvr_mode)
+        return bool(mode_values and any(mode_values))
+
+    def _store_tensor(self, *, kind: str, step_index: int, tensor, lvr_mode=None):
+        if not self._should_capture_tensor(lvr_mode, tensor):
+            return
+        stored = tensor.detach()
+        if self.capture_device_policy == "cpu_float32":
+            stored = stored.float().cpu()
+        else:
+            stored = stored.clone()
+        self.captured_states.append({
+            "kind": kind,
+            "step_index": int(step_index),
+            "shape": _shape(tensor),
+            "lvr_mode_switch": _tensor_bool_list(lvr_mode),
+            "tensor": stored,
+        })
+
+    def _patch_tensor_for_step(self, step_index: int, current):
+        if not self.patch_states or current is None or not torch.is_tensor(current):
+            return current
+        patch_steps = self.patch_steps
+        if patch_steps is not None and step_index not in patch_steps:
+            return current
+        patch_idx = min(self.n_patch_applied, len(self.patch_states) - 1)
+        replacement = self.patch_states[patch_idx]
+        if replacement is None or not torch.is_tensor(replacement):
+            return current
+        patched = current.clone()
+        repl = replacement.to(device=current.device, dtype=current.dtype)
+        if repl.dim() == current.dim() - 1:
+            repl = repl.unsqueeze(0)
+        if repl.shape != patched.shape:
+            slices = tuple(slice(0, min(a, b)) for a, b in zip(patched.shape, repl.shape))
+            patched[slices] = repl[slices]
+        else:
+            patched = repl.clone()
+        self.n_patch_applied += 1
+        return patched
+
     def _register(self):
         model = self.wrapper.model
         self._register_model_forward(model)
@@ -108,18 +161,67 @@ class TraceRecorder:
             kwargs = kwargs or {}
             lvr_mode = kwargs.get("lvr_mode_switch")
             last_hidden = kwargs.get("last_position_hidden_state")
+            step_index = len([
+                event for event in self.events
+                if event.get("hook") == "model_forward_pre"
+            ])
+            patch_applied_before = int(self.n_patch_applied)
+            if last_hidden is not None and self.patch_states:
+                patched = self._patch_tensor_for_step(step_index, last_hidden)
+                if patched is not last_hidden:
+                    kwargs["last_position_hidden_state"] = patched
+                    last_hidden = patched
             input_ids = kwargs.get("input_ids")
             if input_ids is None and args:
                 input_ids = args[0]
+            self._store_tensor(
+                kind="incoming_last_position_hidden_state",
+                step_index=step_index,
+                tensor=last_hidden,
+                lvr_mode=lvr_mode,
+            )
             self._append({
                 "hook": "model_forward_pre",
+                "step_index": step_index,
                 "lvr_mode_switch": _tensor_bool_list(lvr_mode),
                 "last_position_hidden_state_shape": _shape(last_hidden),
                 "input_ids_shape": _shape(input_ids),
                 "inputs_embeds_shape": _shape(kwargs.get("inputs_embeds")),
+                "patched_last_position_hidden_state": int(self.n_patch_applied) > patch_applied_before,
             })
+            return args, kwargs
 
         self.handles.append(model.register_forward_pre_hook(hook, with_kwargs=True))
+
+        def output_hook(_module, _args, output):
+            step_index = len([
+                event for event in self.events
+                if event.get("hook") == "model_forward_output"
+            ])
+            tensor = getattr(output, "last_position_hidden_state", None)
+            lvr_mode = None
+            pre_events = [
+                event for event in self.events
+                if event.get("hook") == "model_forward_pre"
+            ]
+            if step_index < len(pre_events):
+                lvr_mode = pre_events[step_index].get("lvr_mode_switch")
+                if lvr_mode is not None:
+                    lvr_mode = torch.tensor(lvr_mode, dtype=torch.bool)
+            self._store_tensor(
+                kind="output_last_position_hidden_state",
+                step_index=step_index,
+                tensor=tensor,
+                lvr_mode=lvr_mode,
+            )
+            self._append({
+                "hook": "model_forward_output",
+                "step_index": step_index,
+                "last_position_hidden_state_shape": _shape(tensor),
+            })
+            return output
+
+        self.handles.append(model.register_forward_hook(output_hook))
 
     def _register_embed(self, model):
         path, module = _first_module(model, [
@@ -265,6 +367,15 @@ class TraceRecorder:
             "mode": modes,
             "n_lvr_mode_steps": int(sum(bool(item) for item in modes)),
             "n_hidden_feedback_steps": len(hidden_feedback_steps),
+            "n_captured_latent_states": len(self.captured_states),
+            "captured_steps": [int(item["step_index"]) for item in self.captured_states],
+            "hidden_size": (
+                int(self.captured_states[-1]["shape"][-1])
+                if self.captured_states and self.captured_states[-1].get("shape")
+                else None
+            ),
+            "capture_device_policy": self.capture_device_policy,
+            "n_patch_applied": int(self.n_patch_applied),
             "n_embed_calls": len(embed_events),
             "lm_head_called": bool(lm_head_calls),
             "lm_head_call_count": len(lm_head_calls),
@@ -279,12 +390,31 @@ class TracedLVRQwenAdapter(LVRQwenAdapter):
     """LVR adapter variant that instruments generation with sparse hooks."""
 
     def generate_with_trace(self, wrapper, image, question: str, **kwargs) -> dict:
+        trace_capture = kwargs.pop("trace_capture", {}) or {}
+        capture_tensors = bool(trace_capture.get("capture_tensors", False))
+        max_captured = int(trace_capture.get("max_captured_tensors", 16))
+        patch_states = trace_capture.get("patch_states")
+        patch_steps = trace_capture.get("patch_steps")
+        if patch_steps is not None:
+            patch_steps = {int(step) for step in patch_steps}
         try:
-            with TraceRecorder(wrapper) as recorder:
+            with TraceRecorder(
+                wrapper,
+                capture_tensors=capture_tensors,
+                max_captured_tensors=max_captured,
+                patch_states=patch_states,
+                patch_steps=patch_steps,
+            ) as recorder:
                 trace = super().generate_with_trace(wrapper, image, question, **kwargs)
             sparse = recorder.summary()
+            tensor_bank = [
+                {k: v for k, v in item.items() if k != "tensor"}
+                for item in recorder.captured_states
+            ]
             trace.update({
                 **sparse,
+                "captured_state_metadata": tensor_bank,
+                "_captured_states": recorder.captured_states,
                 "legacy_trace_quality": trace.get("trace_quality"),
                 "trace_quality": sparse["trace_quality"],
                 "notes": {
