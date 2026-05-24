@@ -20,6 +20,20 @@ The Findings gate is explicit rather than implicit: `tools/validate_findings_gat
 
 The next Main-track expansion is a Monet preflight. Monet is now configured and locally preflighted as a public second-paradigm candidate (`NOVAglow646/Monet-7B` plus `NOVAglow646/Monet-SFT-125K`), but it is not yet counted as causal evidence. The current Monet adapter is for architecture and standard-forward probes; true Monet latent-state intervention still requires a modified-vLLM trace adapter. Local W12 preflight run: `runs/w12_monet_preflight_n16`.
 
+## Why Monet Next
+
+Monet is the W12 second-paradigm choice because it is the lowest-risk path from Findings toward Main:
+
+| Criterion | Why Monet fits |
+|---|---|
+| Public artifacts | Official `NOVAglow646/Monet-7B` weights, `NOVAglow646/Monet-SFT-125K` data, and source code are available. |
+| Backbone control | It uses Qwen2.5-VL-7B, keeping the comparison close to the existing Qwen/LVR stack instead of mixing in a new backbone confound. |
+| Distinct latent mechanism | Monet enters latent visual reasoning through `<abs_vis_token>` and the official modified vLLM runner, making it a real paradigm contrast to LVR hidden-feedback. |
+| Hook path clarity | The release exposes a customized Transformers model for standard-forward probes and a modified vLLM runner for the future true-latent trace adapter. |
+| Dataset utility | Monet-SFT provides a public source for adapter preflight samples before we attempt causal latent intervention. |
+
+Latent Sketchpad remains important as the MazePlanning data source and a possible later model candidate. CrystaL remains a good M3 candidate, but it overlaps more directly with PF-style corruption/alignment ideas and is less immediately clean as the next adapter target. Monet therefore gives the best near-term balance of public availability, same-backbone comparability, and a genuine latent-runtime mechanism.
+
 ## Architecture
 
 ```text
