@@ -7,13 +7,13 @@
 This repository is currently at:
 
 ```text
-Engineering stage: W4 latent step-localization gate passed
-Scientific stage: true LVR hidden-feedback gate + localization scaffold, not paper-grade causal evidence
+Engineering stage: W8 evidence package passed
+Scientific stage: true LVR hidden-feedback intervention + capacity/localization gates, not paper-grade causal evidence
 ```
 
-The W2 gate demonstrates that the infrastructure can run end to end on real SPD-Faith paired data and real GPU models. The W3 gate adds true inference-time LVR hidden-feedback patching at `n=50`. W4 localizes which hidden-feedback steps drive that transfer at `n=50`, `lvr_steps=8`. These gates are stronger than the original proxy scaffold, but they are still not final paper-scale evidence.
+The W2 gate demonstrates that the infrastructure can run end to end on real SPD-Faith paired data and real GPU models. The W3 gate adds true inference-time LVR hidden-feedback patching at `n=50`. W4 localizes which hidden-feedback steps drive that transfer at `n=50`, `lvr_steps=8`. W5 sweeps latent feedback budget, W6 replicates the best-step intervention, W7 scales SPD regression evidence to `n=200`, and W8 packages the evidence for review. These gates are stronger than the original proxy scaffold, but they are still not final paper-scale evidence.
 
-The SPD range run treats `lvr_7b` as an LVR-weight model under query-span paired intervention, not as a true continuous latent-state intervention. The true latent-state evidence comes from the W3/W4 traced LVR runs.
+The SPD range runs treat `lvr_7b` as an LVR-weight model under query-span paired intervention, not as a true continuous latent-state intervention. The true latent-state evidence comes from the W3-W6 traced LVR runs.
 
 ## Architecture
 
@@ -22,8 +22,13 @@ lvr-eval-mechanistic-audit/
 ├── config.yaml
 ├── config.trace_v2.yaml
 ├── config.spd_faith.range.yaml
+├── config.spd_faith.week7_scale.yaml
 ├── config.lvr_latent_patch.range.yaml
 ├── config.lvr_latent_patch.stepsweep.yaml
+├── config.lvr_latent_patch.stepsweep_s2.yaml
+├── config.lvr_latent_patch.stepsweep_s4.yaml
+├── config.lvr_latent_patch.stepsweep_s16.yaml
+├── config.lvr_latent_patch.beststep_s8.yaml
 ├── prereg/
 │   └── manifest.yaml
 ├── run_all.py
@@ -32,11 +37,19 @@ lvr-eval-mechanistic-audit/
 ├── tools/
 │   ├── prepare_spd_faith_hf.py
 │   ├── validate_spd_range.py
+│   ├── validate_capacity_sweep.py
+│   ├── validate_w3_latent.py
+│   ├── validate_w4_stepsweep.py
+│   ├── build_evidence_pack.py
 │   ├── run_and_hold.sh
 │   └── hold_gpu.py
 ├── docs/
 │   ├── validation_report.md
-│   └── validation_report_w2.md
+│   ├── validation_report_w2.md
+│   ├── validation_report_w3.md
+│   ├── validation_report_w4.md
+│   ├── validation_report_w5_w8.md
+│   └── evidence_pack_w5_w8.md
 └── pipeline/
     ├── adapters/
     │   ├── base.py
@@ -110,7 +123,7 @@ There are three metric layers.
 
 W2 v2 metrics are validated as runnable-v0 gates. They are not yet full paper-grade causal evidence.
 
-4. **W3/W4 true LVR hidden-feedback intervention**
+4. **W3-W6 true LVR hidden-feedback intervention**
 
    `lvr_latent_patch_answer_transfer` patches real `output_last_position_hidden_state` tensors captured from the LVR generation loop.
 
@@ -118,6 +131,12 @@ W2 v2 metrics are validated as runnable-v0 gates. They are not yet full paper-gr
    |---|---|---|---|
    | W3 last-step gate | `config.lvr_latent_patch.range.yaml` | `latent_answer_transfer_rate` | passed at n=50 |
    | W4 step sweep | `config.lvr_latent_patch.stepsweep.yaml` | `best_step_transfer_rate`, `step_transfer_auc` | passed at n=50, lvr_steps=8 |
+   | W5 capacity sweep | `config.lvr_latent_patch.stepsweep_s{2,4,16}.yaml` + W4 s8 config | `best_step_transfer_rate`, `step_transfer_auc` | passed at n=50 for s2/s4/s8/s16 |
+   | W6 best-step replication | `config.lvr_latent_patch.beststep_s8.yaml` | `latent_answer_transfer_rate` | passed at n=50, step 4 |
+
+5. **W7 SPD regression scale-up**
+
+   `config.spd_faith.week7_scale.yaml` reruns the six W2 v2 metrics on 200 paired SPD-Faith samples across `qwen2_5_vl_3b`, `qwen2_5_vl_7b`, and `lvr_7b`. This is scale/regression evidence, not true latent-state intervention evidence.
 
 ## Data Sources
 
@@ -255,6 +274,101 @@ bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
 
 See [docs/validation_report_w3.md](/home/pengguangyue/workspace/proj/lvr-eval-mechanistic-audit/docs/validation_report_w3.md) and [docs/validation_report_w4.md](/home/pengguangyue/workspace/proj/lvr-eval-mechanistic-audit/docs/validation_report_w4.md).
 
+## W5-W8 Reproduction
+
+W5 latent capacity sweep:
+
+```bash
+bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
+  --config config.lvr_latent_patch.stepsweep_s2.yaml \
+  --models lvr_7b \
+  --only lvr_latent_patch_answer_transfer \
+  --device cuda:0 \
+  --run-name w5_lvr_capacity_s2_n50
+
+bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
+  --config config.lvr_latent_patch.stepsweep_s4.yaml \
+  --models lvr_7b \
+  --only lvr_latent_patch_answer_transfer \
+  --device cuda:0 \
+  --run-name w5_lvr_capacity_s4_n50
+
+bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
+  --config config.lvr_latent_patch.stepsweep.yaml \
+  --models lvr_7b \
+  --only lvr_latent_patch_answer_transfer \
+  --device cuda:0 \
+  --run-name w5_lvr_capacity_s8_n50
+
+bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
+  --config config.lvr_latent_patch.stepsweep_s16.yaml \
+  --models lvr_7b \
+  --only lvr_latent_patch_answer_transfer \
+  --device cuda:0 \
+  --run-name w5_lvr_capacity_s16_n50
+
+./venv/bin/python tools/validate_capacity_sweep.py \
+  runs/w5_lvr_capacity_s2_n50 \
+  runs/w5_lvr_capacity_s4_n50 \
+  runs/w5_lvr_capacity_s8_n50 \
+  runs/w5_lvr_capacity_s16_n50 \
+  --min-pairs 50 \
+  --min-steps 1
+```
+
+W6 best-step replication:
+
+```bash
+bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
+  --config config.lvr_latent_patch.beststep_s8.yaml \
+  --models lvr_7b \
+  --only lvr_latent_patch_answer_transfer \
+  --device cuda:0 \
+  --run-name w6_lvr_beststep4_s8_n50
+
+./venv/bin/python tools/validate_w3_latent.py \
+  runs/w6_lvr_beststep4_s8_n50 \
+  --min-pairs 50
+```
+
+W7 SPD regression scale-up:
+
+```bash
+bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
+  --config config.spd_faith.week7_scale.yaml \
+  --models qwen2_5_vl_3b qwen2_5_vl_7b lvr_7b \
+  --only pf_a_corruption_selectivity pf_b_patch_alignment \
+         bf_patch_answer_transfer bf_swap_latent_replacement \
+         bf_conf_calibrated_progression cf_stage_decay \
+  --device cuda:0 \
+  --run-name w7_spd_scale_m0_m1_m2_n200
+
+./venv/bin/python tools/validate_spd_range.py \
+  runs/w7_spd_scale_m0_m1_m2_n200 \
+  --min-pairs 200
+```
+
+W8 evidence pack:
+
+```bash
+./venv/bin/python tools/build_evidence_pack.py \
+  --w5 runs/w5_lvr_capacity_s2_n50 runs/w5_lvr_capacity_s4_n50 \
+       runs/w5_lvr_capacity_s8_n50 runs/w5_lvr_capacity_s16_n50 \
+  --w6 runs/w6_lvr_beststep4_s8_n50 \
+  --w7 runs/w7_spd_scale_m0_m1_m2_n200
+```
+
+Recorded W5-W8 results:
+
+| gate | result |
+|---|---|
+| W5 capacity sweep | all four budgets passed; best transfer rates s2/s4/s8/s16 = 0.44 / 0.52 / 0.44 / 0.48 |
+| W6 best step | step 4 targeted patch passed with `latent_answer_transfer_rate=0.60` |
+| W7 SPD scale-up | 18/18 sanity pass, 66 CI rows, paired BF metrics `200/0` success/error per model |
+| W8 evidence pack | [docs/evidence_pack_w5_w8.md](/home/pengguangyue/workspace/proj/lvr-eval-mechanistic-audit/docs/evidence_pack_w5_w8.md) |
+
+See [docs/validation_report_w5_w8.md](/home/pengguangyue/workspace/proj/lvr-eval-mechanistic-audit/docs/validation_report_w5_w8.md) for exact commands, reductions, and validators.
+
 ## Analysis
 
 `summary_with_ci.json` uses bootstrap confidence intervals. For v2 sample-level artifacts it groups derived rows by `paired_id`, falling back to `id`, before bootstrapping group-level values. This prevents multi-layer, multi-bucket, or multi-family derived rows from being counted as independent samples when group keys are present.
@@ -263,8 +377,10 @@ Legacy artifacts without group keys keep the old one-sample bootstrap fallback.
 
 ## Known Boundaries
 
-- W2/W3/W4 are reproducibility and localization gates, not a final causal-result package.
+- W2-W8 are reproducibility, localization, capacity, and scale-up gates, not a final causal-result package.
 - `pf_b_patch_alignment` currently reports native attention-proxy alignment; DINO patch correspondence remains optional and disabled for the W2 gate.
 - `bf_swap_latent_replacement` now records self-swap, reverse-swap, and random-pair controls, but stronger controlled latent-block protocols are still needed.
 - `cf_stage_decay` uses `late_delta` as the primary scalar; `late_retention` can explode when the clean late-stage baseline is near zero and is diagnostic only.
-- W4 step localization uses `lvr_steps=8`; broader tasks, larger sample sizes, and layer-level localization remain future work.
+- W3-W6 latent patching is true inference-time LVR hidden-feedback intervention on SPD-Faith constrained `original` / `modified` answers.
+- W7 remains query-span regression evidence across Qwen/LVR weights, not true latent-state intervention evidence.
+- Broader tasks, larger sample sizes, external LVR paradigms, and layer-level localization remain future work.
