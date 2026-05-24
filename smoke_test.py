@@ -30,6 +30,7 @@ from pipeline.adapters.lvr_qwen import LVRQwenAdapter
 from pipeline.adapters.lvr_qwen_traced import TraceRecorder, TracedLVRQwenAdapter
 from pipeline.adapters.probe_catalog import list_adapter_probes, validate_adapter_probes
 from pipeline.adapters.qwen_vl import QwenVLAdapter
+from pipeline.adapters.registry import get_adapter, known_adapters
 from pipeline.corruptions import apply_mask, irrelevant_mask, random_mask, relevant_mask
 from pipeline.data import load_probe_set
 from pipeline.internal_metrics import corrupt_image, get_post_image_text_span
@@ -70,6 +71,7 @@ from tools.validate_capacity_sweep import main as validate_capacity_sweep_main
 from tools.build_evidence_pack import main as build_evidence_pack_main
 from tools.build_findings_pack import main as build_findings_pack_main
 from tools.prepare_maze_planning_hf import main as prepare_maze_planning_hf_main
+from tools.prepare_monet_sft_hf import extract_prompt_answer, strip_latent_tokens
 from tools.validate_findings_gate import main as validate_findings_gate_main
 from tools.validate_w3_latent import main as validate_w3_latent_main
 from tools.validate_w4_stepsweep import main as validate_w4_stepsweep_main
@@ -1887,7 +1889,38 @@ def test_adapter_probe_catalog():
     assert summary["n_models"] == 3
     assert set(summary["model_ids"]) == {"monet", "latent_sketchpad", "crystal"}
     assert summary["main_pool_ready"] == []
+    monet = next(row for row in probes if row["model_id"] == "monet")
+    assert monet["main_pool_status"] == "candidate_w12_preflight"
+    assert "NOVAglow646/Monet-7B" in monet["public_weights"]
+    assert "vLLM" in monet["hookability"]
     print("  Monet / Latent Sketchpad / CrystaL go-no-go metadata -> ok")
+
+
+def test_monet_preflight_wiring():
+    print("\n== 10k. Monet W12 preflight wiring ==")
+    assert "monet_qwen2_5_vl" in known_adapters()
+    adapter = get_adapter("monet_qwen2_5_vl")
+    assert adapter.__class__.__name__ == "MonetQwenAdapter"
+    try:
+        adapter.generate_with_trace(None, None, "q?")
+        raise AssertionError("Monet standard-forward adapter should not claim trace support")
+    except NotImplementedError as exc:
+        assert "modified vLLM" in str(exc)
+
+    record = {
+        "conversations": [
+            {"from": "human", "value": "<image>\nSolve this."},
+            {"from": "gpt", "value": "<abs_vis_token>hidden</abs_vis_token> Final: blue"},
+        ]
+    }
+    prompt, answer = extract_prompt_answer(record)
+    assert prompt == "Solve this."
+    assert strip_latent_tokens(answer) == "<latent> Final: blue"
+
+    cfg = yaml.safe_load(Path("config.monet.preflight.yaml").read_text(encoding="utf-8"))
+    assert cfg["models"]["monet_7b"]["arch"] == "monet_qwen2_5_vl"
+    assert cfg["models"]["monet_7b"]["latent_start_id"] == 151666
+    print("  Monet adapter registry, data parser, and config boundary -> ok")
 
 
 def test_bf1_does_not_cache_gpu_inputs_static():
@@ -2006,6 +2039,7 @@ def main():
     test_findings_gate_tooling_fixtures()
     test_latent_trace_policy_violation()
     test_adapter_probe_catalog()
+    test_monet_preflight_wiring()
     test_bf1_does_not_cache_gpu_inputs_static()
     test_end_to_end()
     print("\nSMOKE TEST PASSED ✅")

@@ -9,6 +9,7 @@ This repository is currently at:
 ```text
 Engineering stage: W8 evidence package passed
 Scientific stage: Findings gate passed; true LVR hidden-feedback intervention, SPD scale evidence, and MazePlanning subset evidence are present
+Main-track next step: W12 Monet preflight for a second real latent paradigm
 ```
 
 The W2 gate demonstrates that the infrastructure can run end to end on real SPD-Faith paired data and real GPU models. The W3 gate adds true inference-time LVR hidden-feedback patching at `n=50`. W4 localizes which hidden-feedback steps drive that transfer at `n=50`, `lvr_steps=8`. W5 sweeps latent feedback budget, W6 replicates the best-step intervention, W7 scales SPD regression evidence to `n=200`, and W8 packages the evidence for review. These gates are stronger than the original proxy scaffold, but they are still not final paper-scale evidence.
@@ -16,6 +17,8 @@ The W2 gate demonstrates that the infrastructure can run end to end on real SPD-
 The SPD range runs treat `lvr_7b` as an LVR-weight model under query-span paired intervention, not as a true continuous latent-state intervention. The true latent-state evidence comes from the W3-W6 traced LVR runs.
 
 The Findings gate is explicit rather than implicit: `tools/validate_findings_gate.py` requires W3/W4/W6 true latent artifacts, W7 SPD artifacts, and a real Maze Findings run. The current local repository has all required artifacts, including `runs/w9_maze_findings_m0_m1_m2_n200_bbox`.
+
+The next Main-track expansion is a Monet preflight. Monet is now configured and locally preflighted as a public second-paradigm candidate (`NOVAglow646/Monet-7B` plus `NOVAglow646/Monet-SFT-125K`), but it is not yet counted as causal evidence. The current Monet adapter is for architecture and standard-forward probes; true Monet latent-state intervention still requires a modified-vLLM trace adapter. Local W12 preflight run: `runs/w12_monet_preflight_n16`.
 
 ## Architecture
 
@@ -27,6 +30,7 @@ lvr-eval-mechanistic-audit/
 ├── config.spd_faith.week7_scale.yaml
 ├── config.findings_spd_scale.yaml
 ├── config.maze.findings.yaml
+├── config.monet.preflight.yaml
 ├── config.lvr_latent_patch.range.yaml
 ├── config.lvr_latent_patch.stepsweep.yaml
 ├── config.lvr_latent_patch.stepsweep_s2.yaml
@@ -41,12 +45,14 @@ lvr-eval-mechanistic-audit/
 ├── tools/
 │   ├── prepare_spd_faith_hf.py
 │   ├── prepare_maze_planning_hf.py
+│   ├── prepare_monet_sft_hf.py
 │   ├── validate_spd_range.py
 │   ├── validate_capacity_sweep.py
 │   ├── validate_w3_latent.py
 │   ├── validate_w4_stepsweep.py
 │   ├── build_evidence_pack.py
 │   ├── build_findings_pack.py
+│   ├── check_monet_env.py
 │   ├── check_lvr_env.py
 │   ├── compare_capacity_sweep.py
 │   ├── validate_findings_gate.py
@@ -67,6 +73,7 @@ lvr-eval-mechanistic-audit/
     │   ├── qwen_vl.py
     │   ├── lvr_qwen.py
     │   ├── lvr_qwen_traced.py
+    │   ├── monet_qwen.py
     │   ├── probe_catalog.py
     │   ├── spans.py
     │   └── registry.py
@@ -149,6 +156,10 @@ W2 v2 metrics are validated as runnable-v0 gates. They are not yet full paper-gr
 
    `config.spd_faith.week7_scale.yaml` reruns the six W2 v2 metrics on 200 paired SPD-Faith samples across `qwen2_5_vl_3b`, `qwen2_5_vl_7b`, and `lvr_7b`. This is scale/regression evidence, not true latent-state intervention evidence.
 
+6. **W12 Monet second-paradigm preflight**
+
+   `config.monet.preflight.yaml` introduces Monet-7B as a real public latent-paradigm candidate. `pipeline/adapters/monet_qwen.py` loads Monet's customized Transformers model for architecture and standard-forward probes. The local preflight loaded `models/Monet-7B`, verified official source commit `08939998d3d643a73a316e349faa34f420429153`, prepared 16 Monet-SFT samples, and ran PF-A/PF-B/BF-Conf at `runs/w12_monet_preflight_n16`. This is intentionally not the final Monet causal metric path: Monet's true latent reasoning happens through the official modified vLLM runner, so paper-grade Monet latent evidence requires a dedicated vLLM trace adapter.
+
 ## Data Sources
 
 Supported `data.source_type` values include:
@@ -212,6 +223,40 @@ This writes:
 data/maze_planning/manifest.jsonl
 data/maze_planning/prepare_stats.json
 data/maze_planning/images/
+```
+
+Prepare a small Monet-SFT preflight manifest from the public Monet dataset:
+
+```bash
+./venv/bin/python - <<'PY'
+from huggingface_hub import hf_hub_download
+for name in ["CogCoM/images.zip"]:
+    print(hf_hub_download("NOVAglow646/Monet-SFT-125K", name, repo_type="dataset", local_dir="data/monet_sft_raw"))
+PY
+
+./venv/bin/python tools/prepare_monet_sft_hf.py \
+  --max-samples 16 \
+  --image-archive-root data/monet_sft_raw \
+  --out data/monet_sft
+```
+
+Check local Monet-7B and the official `NOVAglow646/Monet` source checkout without loading model weights:
+
+```bash
+./venv/bin/python tools/check_monet_env.py \
+  --config config.monet.preflight.yaml \
+  --check-data
+```
+
+The first Monet probe is standard-forward only:
+
+```bash
+bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
+  --config config.monet.preflight.yaml \
+  --models monet_7b \
+  --only pf_a_corruption_selectivity pf_b_patch_alignment bf_conf_calibrated_progression \
+  --device cuda:0 \
+  --run-name w12_monet_preflight_n16
 ```
 
 ## Trace v2

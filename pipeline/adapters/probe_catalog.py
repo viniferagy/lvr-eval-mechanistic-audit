@@ -19,11 +19,18 @@ PROBES: tuple[AdapterProbe, ...] = (
     AdapterProbe(
         model_id="monet",
         display_name="Monet",
-        public_weights="unverified",
-        hookability="unknown_adapter_surface",
-        main_pool_status="no_go_week2",
-        rationale="Do not enter main pool until local public weights and decoder-layer hooks are verified.",
-        next_action="Record exact checkpoint path and run a no-forward architecture probe before GPU audit.",
+        public_weights="verified_public_hf:NOVAglow646/Monet-7B",
+        hookability="candidate_transformers_standard_forward; latent inference requires modified vLLM runner",
+        main_pool_status="candidate_w12_preflight",
+        rationale=(
+            "Official Monet exposes public 7B weights, public SFT data, and a customized "
+            "Qwen2.5-VL/vLLM latent inference path. It is the preferred second real "
+            "latent paradigm once local checkpoint/source probes pass."
+        ),
+        next_action=(
+            "Download Monet-7B and clone NOVAglow646/Monet, run tools/check_monet_env.py, "
+            "then run a no-forward adapter probe before implementing the vLLM latent trace adapter."
+        ),
     ),
     AdapterProbe(
         model_id="latent_sketchpad",
