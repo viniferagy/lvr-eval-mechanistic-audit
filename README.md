@@ -324,7 +324,8 @@ bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
   runs/w5_lvr_capacity_s8_n50 \
   runs/w5_lvr_capacity_s16_n50 \
   --min-pairs 50 \
-  --min-steps 1
+  --min-steps 1 \
+  --expected-steps 2 4 6 10
 
 ./venv/bin/python tools/compare_capacity_sweep.py \
   runs/w5_lvr_capacity_s2_n50 \
@@ -371,7 +372,7 @@ W8 evidence pack:
 ./venv/bin/python tools/build_evidence_pack.py
 ```
 
-The builder is fail-fast by default: missing metric JSON, missing or non-pass sanity summaries, missing W7 CI rows, and invalid W5 capacity sweep artifacts abort generation. `--allow-missing` is available only for legacy/local drafting.
+The builder is fail-fast by default: missing metric JSON, missing or non-pass sanity summaries, missing W7 metric files, missing W7 primary CI rows, and invalid W5 capacity sweep artifacts abort generation. `--allow-missing` is available only for legacy/local drafting.
 
 Recorded W5-W8 results:
 

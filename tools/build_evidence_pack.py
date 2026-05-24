@@ -8,6 +8,15 @@ from pathlib import Path
 
 METRIC_ID = "lvr_latent_patch_answer_transfer"
 MODEL = "lvr_7b"
+W7_MODELS = ("qwen2_5_vl_3b", "qwen2_5_vl_7b", "lvr_7b")
+W7_PRIMARY_SCALARS = {
+    "pf_a_corruption_selectivity": "selectivity",
+    "pf_b_patch_alignment": "native_alignment",
+    "bf_patch_answer_transfer": "logprob_margin_shift",
+    "bf_swap_latent_replacement": "swap_margin_shift",
+    "bf_conf_calibrated_progression": "gold_logit_slope",
+    "cf_stage_decay": "late_delta",
+}
 
 
 def fail(msg: str) -> None:
@@ -85,6 +94,36 @@ def w7_ci_rows(run_dir: Path, *, allow_missing: bool = False) -> list:
     return rows
 
 
+def validate_w7_artifacts(run_dir: Path, ci_rows: list, *, allow_missing: bool = False) -> None:
+    if allow_missing:
+        return
+    for metric_id in W7_PRIMARY_SCALARS:
+        for model in W7_MODELS:
+            path = run_dir / "metrics" / f"{metric_id}_{model}.json"
+            if not path.is_file():
+                fail(f"W7 metric file missing: {path}")
+            envelope = load_json(path)
+            if envelope.get("metric_id") != metric_id or envelope.get("model") != model:
+                fail(f"W7 metric envelope mismatch: {path}")
+            payload = envelope.get("payload") or {}
+            reduction = payload.get("reduction") or {}
+            scalar = W7_PRIMARY_SCALARS[metric_id]
+            if reduction.get(scalar) is None:
+                fail(f"W7 primary scalar missing: {metric_id}/{model}/{scalar}")
+    ci_keys = {
+        (row.get("metric_id"), row.get("model"), row.get("scalar"))
+        for row in ci_rows
+        if int(row.get("n") or 0) > 0
+    }
+    missing = []
+    for metric_id, scalar in W7_PRIMARY_SCALARS.items():
+        for model in W7_MODELS:
+            if (metric_id, model, scalar) not in ci_keys:
+                missing.append(f"{metric_id}/{model}/{scalar}")
+    if missing:
+        fail(f"W7 summary_with_ci missing primary row(s): {missing[:8]}")
+
+
 def validate_capacity_runs(run_dirs: list[Path], reductions: list[dict], *, allow_missing: bool = False) -> None:
     if allow_missing:
         return
@@ -135,6 +174,7 @@ def main(argv: list[str] | None = None) -> None:
         run_dir = Path(args.w7)
         sanity_status(run_dir, allow_missing=allow_missing)
         w7_rows = w7_ci_rows(run_dir, allow_missing=allow_missing)
+        validate_w7_artifacts(run_dir, w7_rows, allow_missing=allow_missing)
 
     lines = [
         "# W5-W8 Evidence Pack",

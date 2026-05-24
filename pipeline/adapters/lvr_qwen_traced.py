@@ -402,6 +402,9 @@ class TracedLVRQwenAdapter(LVRQwenAdapter):
         patch_states = trace_capture.get("patch_states")
         patch_steps = trace_capture.get("patch_steps")
         patch_shape_policy = str(trace_capture.get("patch_shape_policy", "strict"))
+        trace_v2_cfg = (getattr(wrapper, "cfg", {}) or {}).get("trace_v2", {}) or {}
+        require_trace = bool(trace_v2_cfg.get("required", False))
+        forbid_fallback = bool(trace_v2_cfg.get("forbid_fallback", require_trace))
         if patch_steps is not None:
             patch_steps = {int(step) for step in patch_steps}
         try:
@@ -433,6 +436,8 @@ class TracedLVRQwenAdapter(LVRQwenAdapter):
             })
             return trace
         except Exception as exc:  # noqa: BLE001
+            if patch_states or require_trace or forbid_fallback:
+                raise
             logger.warning("trace v2 failed; falling back to legacy trace: %s", exc)
             trace = super().generate_with_trace(wrapper, image, question, **kwargs)
             trace["trace_quality"] = trace.get("trace_quality") or "approx_from_generated_token_ids"

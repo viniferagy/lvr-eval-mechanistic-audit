@@ -14,6 +14,8 @@ smoke_test.py
 """
 from __future__ import annotations
 
+import copy
+import hashlib
 import os
 import json
 import tempfile
@@ -25,7 +27,7 @@ from PIL import Image
 import yaml
 
 from pipeline.adapters.lvr_qwen import LVRQwenAdapter
-from pipeline.adapters.lvr_qwen_traced import TraceRecorder
+from pipeline.adapters.lvr_qwen_traced import TraceRecorder, TracedLVRQwenAdapter
 from pipeline.adapters.probe_catalog import list_adapter_probes, validate_adapter_probes
 from pipeline.adapters.qwen_vl import QwenVLAdapter
 from pipeline.corruptions import apply_mask, irrelevant_mask, random_mask, relevant_mask
@@ -68,6 +70,7 @@ from tools.validate_capacity_sweep import main as validate_capacity_sweep_main
 from tools.build_evidence_pack import main as build_evidence_pack_main
 from tools.validate_w3_latent import main as validate_w3_latent_main
 from tools.validate_w4_stepsweep import main as validate_w4_stepsweep_main
+from run_all import metric_enabled, selected_metric_ids
 
 
 def make_img(seed=0):
@@ -384,9 +387,10 @@ def test_lvr_json_loader():
     print("  LVR JSON list -> ProbeSample with lvr metadata ok")
 
     missing_lvr_path = os.path.join(out_dir, "missing_lvr.json")
-    data[0]["conversations"][1]["value"] = "<answer>dark blue denim shorts</answer>"
+    missing_lvr_data = copy.deepcopy(data)
+    missing_lvr_data[0]["conversations"][1]["value"] = "<answer>dark blue denim shorts</answer>"
     with open(missing_lvr_path, "w", encoding="utf-8") as f:
-        json.dump(data, f)
+        json.dump(missing_lvr_data, f)
     samples = load_probe_set({
         "source_type": "lvr_json",
         "json_path": missing_lvr_path,
@@ -398,7 +402,14 @@ def test_lvr_json_loader():
     print("  missing assistant-side <lvr> skipped by default -> ok")
 
     limited_path = os.path.join(out_dir, "limited_lvr.json")
-    records = data + [dict(data[0], question_id=31594), dict(data[0], question_id=31595)]
+    bad = copy.deepcopy(data[0])
+    bad["question_id"] = 31592
+    bad["conversations"][1]["value"] = "<answer>dark blue denim shorts</answer>"
+    good = copy.deepcopy(data[0])
+    good["question_id"] = 31593
+    good2 = copy.deepcopy(data[0])
+    good2["question_id"] = 31594
+    records = [bad, good, good2]
     with open(limited_path, "w", encoding="utf-8") as f:
         json.dump(records, f)
     samples = load_probe_set({
@@ -408,7 +419,15 @@ def test_lvr_json_loader():
         "max_scan_records": 1,
         "skip_missing_images": False,
     })
-    assert len(samples) == 0  # current data[0] was mutated to remove <lvr>
+    assert len(samples) == 0
+    samples = load_probe_set({
+        "source_type": "lvr_json",
+        "json_path": limited_path,
+        "image_root": out_dir,
+        "max_scan_records": 2,
+        "skip_missing_images": False,
+    })
+    assert len(samples) == 1 and samples[0].id == "31593"
     print("  max_scan_records limits LVR JSON scan -> ok")
 
 
@@ -721,6 +740,8 @@ def test_preregistration_and_bootstrap():
     lock = build_lock_payload(manifest, created_at="2026-05-23T00:00:00+00:00")
     assert lock["sha256"] == digest
     assert len(lock["primary_metrics"]) == 6
+    assert lock["experimental_metrics"]
+    assert {gate["gate_id"] for gate in lock["gates"]} >= {"W5_capacity_sweep", "W8_evidence_pack"}
 
     ci = paired_bootstrap([1, 2, 3, 4], seed=1, n_resamples=200)
     assert ci is not None and ci.n == 4
@@ -763,6 +784,12 @@ def test_preregistration_and_bootstrap():
     trace_cfg = yaml.safe_load(Path("config.trace_v2.yaml").read_text())
     assert trace_cfg["models"]["lvr_7b"]["arch"] == "lvr_qwen2_5_vl_traced"
     assert trace_cfg["metrics"]["lvr_generation_trace"]["enabled"] is True
+    assert metric_enabled({"metrics": {"bf_patch_answer_transfer": None}}, "bf_patch_answer_transfer") is True
+    try:
+        selected_metric_ids(["all", "bf_patch"], {"metrics": {}})
+        raise AssertionError("--only all bf_patch should fail")
+    except SystemExit as exc:
+        assert "cannot mix" in str(exc)
     print("  manifest hash/lock + bootstrap summary_with_ci -> ok")
 
 
@@ -1069,6 +1096,31 @@ def test_bf_swap_and_conf_fixtures():
     assert {cell["control"] for cell in swap["control_cells"]} == {
         "self_swap", "reverse_swap", "random_pair_swap"
     }
+    p1 = ProbeSample(
+        id="pair1",
+        image=Image.new("RGB", (8, 8), "white"),
+        question="color?",
+        answer="blue",
+        counterfactual_image=Image.new("RGB", (8, 8), "black"),
+        counterfactual_answer="red",
+        paired_id="pair1",
+    )
+    swap_controls = run_bf_swap_metric(
+        wrapper,
+        [sample, p1],
+        {
+            "bf_swap": {
+                "layers": [0],
+                "position_buckets": ["query"],
+                "max_pairs": 2,
+                "controls": ["random_pair_swap"],
+            }
+        },
+        "tiny",
+    )
+    random_records = swap_controls["control_cells"][0]["records"]
+    assert random_records
+    assert all(record["id"] != record["random_pair_source_id"] for record in random_records)
     conf = run_bf_conf_metric(
         wrapper,
         [sample],
@@ -1478,6 +1530,15 @@ def test_w4_latent_step_sweep_fixtures():
 
 def test_w5_w8_tooling_fixtures():
     print("\n== 10i4. W5-W8 capacity/evidence tooling fixtures ==")
+    w7_scalars = {
+        "pf_a_corruption_selectivity": "selectivity",
+        "pf_b_patch_alignment": "native_alignment",
+        "bf_patch_answer_transfer": "logprob_margin_shift",
+        "bf_swap_latent_replacement": "swap_margin_shift",
+        "bf_conf_calibrated_progression": "gold_logit_slope",
+        "cf_stage_decay": "late_delta",
+    }
+    w7_models = ("qwen2_5_vl_3b", "qwen2_5_vl_7b", "lvr_7b")
 
     def write_latent_run(root: Path, n_steps: int):
         metrics_dir = root / "metrics"
@@ -1518,10 +1579,19 @@ def test_w5_w8_tooling_fixtures():
     write_latent_run(run_a, 2)
     write_latent_run(run_b, 4)
     (run_w7 / "sanity").mkdir()
+    (run_w7 / "metrics").mkdir()
     (run_w7 / "sanity" / "summary_sanity.json").write_text(json.dumps({"overall_status": "pass"}))
-    (run_w7 / "summary_with_ci.json").write_text(json.dumps([
-        {"metric_id": "pf_a_corruption_selectivity", "model": "lvr_7b", "scalar": "selectivity", "n": 1}
-    ]))
+    ci_rows = []
+    for metric_id, scalar in w7_scalars.items():
+        for model in w7_models:
+            payload = {"model": model, "reduction": {scalar: 0.1}, "n_paired": 1}
+            (run_w7 / "metrics" / f"{metric_id}_{model}.json").write_text(json.dumps({
+                "metric_id": metric_id,
+                "model": model,
+                "payload": payload,
+            }))
+            ci_rows.append({"metric_id": metric_id, "model": model, "scalar": scalar, "n": 1})
+    (run_w7 / "summary_with_ci.json").write_text(json.dumps(ci_rows))
 
     import sys
 
@@ -1551,6 +1621,9 @@ def test_w5_w8_tooling_fixtures():
             "1",
             "--min-steps",
             "1",
+            "--expected-steps",
+            "2",
+            "4",
         ]
         validate_capacity_sweep_main()
         out_path = Path(tempfile.mkdtemp(prefix="w8_pack_")) / "pack.md"
@@ -1604,6 +1677,23 @@ def test_latent_trace_policy_violation():
         cfg,
         "ok",
     )
+    adapter = TracedLVRQwenAdapter()
+    wrapper = SimpleNamespace(
+        model=object(),
+        layers=[],
+        n_layers=0,
+        cfg={},
+    )
+    try:
+        adapter.generate_with_trace(
+            wrapper,
+            None,
+            "q?",
+            trace_capture={"patch_states": [object()], "patch_steps": [0]},
+        )
+        raise AssertionError("patched traced generation must not fallback after hook failure")
+    except Exception as exc:  # noqa: BLE001
+        assert "register" in repr(exc) or "Failed" in repr(exc) or "object" in repr(exc)
     print("  latent metric rejects trace fallback under required policy -> ok")
 
 
@@ -1631,7 +1721,8 @@ def test_bf1_does_not_cache_gpu_inputs_static():
 
 
 def fake_bf1(tag, n_layers=28, strength=1.0):
-    rng = np.random.default_rng(hash(tag) % 2**31)
+    seed = int.from_bytes(hashlib.sha256(str(tag).encode("utf-8")).digest()[:4], "little")
+    rng = np.random.default_rng(seed)
     base_bf3 = np.linspace(6, 1, n_layers)
     base_pf3 = np.concatenate([np.linspace(0.1, 0.5, n_layers // 2),
                                np.linspace(0.5, 0.2, n_layers - n_layers // 2)])

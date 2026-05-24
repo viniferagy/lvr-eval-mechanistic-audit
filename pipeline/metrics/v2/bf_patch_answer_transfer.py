@@ -361,6 +361,8 @@ def patch_one_pair(wrapper, sample, *, layer: int, position_bucket: str) -> dict
     return {
         "id": sample.id,
         "paired_id": sample.paired_id,
+        "random_pair_source_id": (sample.task_metadata or {}).get("random_pair_source_id"),
+        "random_pair_source_paired_id": (sample.task_metadata or {}).get("random_pair_source_paired_id"),
         "layer": int(layer),
         "position_bucket": position_bucket,
         "source_answer": str(source.answer),

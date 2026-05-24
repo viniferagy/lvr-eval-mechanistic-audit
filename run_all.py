@@ -60,6 +60,7 @@ WEIGHT_INDEX_FILES = (
     "pytorch_model.bin.index.json",
 )
 DEFAULT_MODEL_TAGS = ["qwen2_5_vl_7b", "lvr_7b"]
+DEFAULT_LVR_WAIT_TIMEOUT_MINUTES = 120.0
 
 
 def setup_logging():
@@ -198,7 +199,33 @@ def path_signature(path: Path) -> tuple[int, int, int]:
     return file_count, total_size, newest_mtime_ns
 
 
-def wait_for_lvr_model_if_needed(tag: str, cfg_model: dict, log: logging.Logger):
+def validate_config(cfg: dict) -> None:
+    if not isinstance(cfg, dict):
+        raise SystemExit("config must be a YAML mapping")
+    required_sections = ("models", "data", "inference", "output")
+    missing = [name for name in required_sections if not isinstance(cfg.get(name), dict)]
+    if missing:
+        raise SystemExit(f"config missing required mapping section(s): {', '.join(missing)}")
+    for key in ("dtype", "device"):
+        if key not in cfg["inference"]:
+            raise SystemExit(f"config.inference.{key} is required")
+    for key in ("root",):
+        if key not in cfg["output"]:
+            raise SystemExit(f"config.output.{key} is required")
+
+
+def lvr_wait_timeout_minutes(cfg: dict) -> float | None:
+    runtime = cfg.get("runtime", {}) or {}
+    value = runtime.get("lvr_wait_timeout_minutes", DEFAULT_LVR_WAIT_TIMEOUT_MINUTES)
+    if value is None:
+        return None
+    value = float(value)
+    if value <= 0:
+        return None
+    return value
+
+
+def wait_for_lvr_model_if_needed(tag: str, cfg_model: dict, log: logging.Logger, *, timeout_minutes: float | None = None):
     if not is_lvr_model(cfg_model):
         return
 
@@ -218,6 +245,11 @@ def wait_for_lvr_model_if_needed(tag: str, cfg_model: dict, log: logging.Logger)
             reason = reason_after_wait if not ready_after_wait else "模型文件还在变化"
 
         elapsed_min = (time.monotonic() - started) / 60
+        if timeout_minutes is not None and elapsed_min >= float(timeout_minutes):
+            raise SystemExit(
+                f"[{tag}] timed out after {elapsed_min:.1f} min waiting for LVR model at "
+                f"{model_path}: {reason}"
+            )
         log.info("[%s] 等待 LVR-7B 下载完成（%.1f min）：%s", tag, elapsed_min, reason)
         time.sleep(MODEL_READY_POLL_SECONDS)
 
@@ -226,7 +258,10 @@ def metric_enabled(cfg: dict, metric_id: str) -> bool:
     """Prefer unified metrics.*.enabled, fallback to legacy section.enabled."""
     metrics_cfg = cfg.get("metrics") or {}
     if metric_id in metrics_cfg:
-        return bool(metrics_cfg[metric_id].get("enabled", True))
+        item = metrics_cfg.get(metric_id) or {}
+        if not isinstance(item, dict):
+            raise SystemExit(f"config.metrics.{metric_id} must be a mapping or null")
+        return bool(item.get("enabled", True))
     legacy_key = get_metric(metric_id).legacy_name
     return bool(cfg.get(legacy_key, {}).get("enabled", False))
 
@@ -234,7 +269,10 @@ def metric_enabled(cfg: dict, metric_id: str) -> bool:
 def selected_metric_ids(tokens: list[str], cfg: dict) -> list[str]:
     runnable = {spec.metric_id: spec for spec in list_runnable_metrics()}
     normalized_tokens = [str(t).strip() for t in tokens if str(t).strip()]
-    if not normalized_tokens or any(t in ("all", "both") for t in normalized_tokens):
+    magic_tokens = {"all", "both"}
+    if any(t in magic_tokens for t in normalized_tokens) and len(normalized_tokens) > 1:
+        raise SystemExit("--only cannot mix all/both with explicit metric ids")
+    if not normalized_tokens or any(t in magic_tokens for t in normalized_tokens):
         return [
             spec.metric_id
             for spec in runnable.values()
@@ -276,7 +314,8 @@ def main():
     args = parse_args()
 
     with open(args.config) as f:
-        cfg = yaml.safe_load(f)
+        cfg = yaml.safe_load(f) or {}
+    validate_config(cfg)
     if args.device:
         cfg["inference"]["device"] = args.device
     if args.output_root:
@@ -321,7 +360,12 @@ def main():
         if tag not in cfg["models"]:
             log.warning("config 中无模型 %s，跳过", tag)
             continue
-        wait_for_lvr_model_if_needed(tag, cfg["models"][tag], log)
+        wait_for_lvr_model_if_needed(
+            tag,
+            cfg["models"][tag],
+            log,
+            timeout_minutes=lvr_wait_timeout_minutes(cfg),
+        )
         wrapper = load_model(
             cfg["models"][tag],
             dtype=cfg["inference"]["dtype"],

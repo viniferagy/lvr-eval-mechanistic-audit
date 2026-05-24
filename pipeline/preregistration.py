@@ -52,6 +52,23 @@ def _primary_metric_summary(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _experimental_metric_summary(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    experimental = manifest.get("experimental_metrics") or []
+    out = []
+    for item in experimental:
+        if not isinstance(item, dict):
+            continue
+        out.append({
+            "metric_id": item.get("metric_id"),
+            "family": item.get("family"),
+            "primary_scalar": item.get("primary_scalar"),
+            "version": item.get("version"),
+            "status": item.get("status"),
+            "scope": item.get("scope"),
+        })
+    return out
+
+
 def build_lock_payload(
     manifest: dict[str, Any],
     *,
@@ -63,6 +80,8 @@ def build_lock_payload(
         "sha256": hash_manifest(manifest),
         "manifest_path": str(manifest_path or DEFAULT_MANIFEST_PATH),
         "primary_metrics": _primary_metric_summary(manifest),
+        "experimental_metrics": _experimental_metric_summary(manifest),
+        "gates": manifest.get("gates") or [],
         "analysis_blind_seed": manifest.get("analysis_blind_seed"),
         "stopping_rule": manifest.get("stopping_rule"),
         "statistics": manifest.get("statistics"),

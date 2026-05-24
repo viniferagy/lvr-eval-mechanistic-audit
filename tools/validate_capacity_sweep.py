@@ -80,6 +80,7 @@ def main() -> None:
     ap.add_argument("run_dirs", nargs="+")
     ap.add_argument("--min-pairs", type=int, default=50)
     ap.add_argument("--min-steps", type=int, default=2)
+    ap.add_argument("--expected-steps", nargs="*", type=int, default=None)
     args = ap.parse_args()
 
     if len(args.run_dirs) < 2:
@@ -90,6 +91,11 @@ def main() -> None:
     ]
     if len({int(r.get("n_steps_evaluated") or 0) for r in reductions}) < 2:
         fail("capacity sweep did not produce distinct n_steps_evaluated values")
+    if args.expected_steps:
+        observed = sorted(int(r.get("n_steps_evaluated") or 0) for r in reductions)
+        expected = sorted(int(v) for v in args.expected_steps)
+        if observed != expected:
+            fail(f"capacity sweep steps mismatch: observed={observed} expected={expected}")
     print("CAPACITY SWEEP VALIDATION PASSED")
 
 

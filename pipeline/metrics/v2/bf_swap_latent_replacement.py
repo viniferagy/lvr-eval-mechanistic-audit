@@ -132,10 +132,19 @@ def _control_samples(control: str, paired: list, seed: int) -> list:
         if len(paired) < 2:
             return []
         rng = random.Random(seed)
-        shuffled = list(paired)
-        rng.shuffle(shuffled)
-        if any(a.id == b.id for a, b in zip(paired, shuffled)):
-            shuffled = shuffled[1:] + shuffled[:1]
+        shuffled = None
+        for _ in range(100):
+            candidate = list(paired)
+            rng.shuffle(candidate)
+            if all(a.id != b.id for a, b in zip(paired, candidate)):
+                shuffled = candidate
+                break
+        if shuffled is None:
+            candidate = list(paired[1:]) + list(paired[:1])
+            if all(a.id != b.id for a, b in zip(paired, candidate)):
+                shuffled = candidate
+            else:
+                raise RuntimeError("failed to construct random_pair_swap derangement")
         return [_random_pair_sample(sample, source) for sample, source in zip(paired, shuffled)]
     raise ValueError(f"unknown BF-Swap control: {control}")
 

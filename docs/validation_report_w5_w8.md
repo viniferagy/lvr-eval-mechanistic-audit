@@ -54,7 +54,8 @@ bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
   runs/w5_lvr_capacity_s4_n50 \
   runs/w5_lvr_capacity_s8_n50 \
   runs/w5_lvr_capacity_s16_n50 \
-  --min-pairs 50 --min-steps 1
+  --min-pairs 50 --min-steps 1 \
+  --expected-steps 2 4 6 10
 ```
 
 W6 best-step replication:
@@ -200,4 +201,4 @@ EVIDENCE PACK VALIDATION PASSED
 
 The evidence pack summarizes W3-W7 gates and restates the scope boundary: W3-W6 are true inference-time LVR hidden-feedback interventions on constrained SPD-Faith answers; W7 is query-span regression evidence across Qwen/LVR weights.
 
-The builder now hard-fails by default on missing latent metric JSON, missing reductions, non-pass sanity summaries, invalid W5 capacity artifacts, or missing/empty W7 CI rows. `--allow-missing` is reserved for local drafting only.
+The builder now hard-fails by default on missing latent metric JSON, missing reductions, non-pass sanity summaries, invalid W5 capacity artifacts, missing W7 metric JSON files, or missing/empty W7 primary CI rows. `--allow-missing` is reserved for local drafting only.
