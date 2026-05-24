@@ -7,9 +7,9 @@
 This repository is currently at:
 
 ```text
-Engineering stage: W13 Monet latent range gate passed
-Scientific stage: Findings gate passed; true LVR hidden-feedback intervention, SPD/Maze evidence, and Monet Transformers latent-mode range evidence are present
-Main-track next step: Monet modified-vLLM scheduler-native trace adapter and larger second-paradigm evidence
+Engineering stage: W14-W15 LVR trace-latent primary-metric gate passed
+Scientific stage: Findings gate passed; true LVR hidden-feedback intervention, SPD/Maze evidence, Monet Transformers latent-mode range evidence, and LVR real-trace versions of all six v2 primary metrics are present
+Main-track next step: scale trace-latent LVR beyond n=50 and implement Monet modified-vLLM scheduler-native trace adapter
 ```
 
 The W2 gate demonstrates that the infrastructure can run end to end on real SPD-Faith paired data and real GPU models. The W3 gate adds true inference-time LVR hidden-feedback patching at `n=50`. W4 localizes which hidden-feedback steps drive that transfer at `n=50`, `lvr_steps=8`. W5 sweeps latent feedback budget, W6 replicates the best-step intervention, W7 scales SPD regression evidence to `n=200`, and W8 packages the evidence for review. These gates are stronger than the original proxy scaffold, but they are still not final paper-scale evidence.
@@ -18,7 +18,7 @@ The SPD range runs treat `lvr_7b` as an LVR-weight model under query-span paired
 
 The Findings gate is explicit rather than implicit: `tools/validate_findings_gate.py` requires W3/W4/W6 true latent artifacts, W7 SPD artifacts, and a real Maze Findings run. The current local repository has all required artifacts, including `runs/w9_maze_findings_m0_m1_m2_n200_bbox`.
 
-The Main-track expansion now includes Monet. W12 established a standard-forward preflight for the public `NOVAglow646/Monet-7B` checkpoint and `NOVAglow646/Monet-SFT-125K` data. W13 adds a causal range gate on real SPD-Faith paired data using Monet's official Transformers latent-mode path (`ce_patch_pos` / `ce_patch_vec`): source counterfactual latent tensors are injected into target latent positions and scored over constrained `original` / `modified` answers. Local W13 run: `runs/w13_monet_latent_patch_n50`, `n=50`, sanity pass, `latent_answer_transfer_rate=0.06` with CI `[0.00, 0.14]`. This is causal hidden-state evidence for Monet's Transformers latent-mode path, but it is still not the modified-vLLM scheduler-native generation loop.
+The Main-track expansion now includes Monet and an LVR trace-latent metric upgrade. W12 established a standard-forward preflight for the public `NOVAglow646/Monet-7B` checkpoint and `NOVAglow646/Monet-SFT-125K` data. W13 adds a causal range gate on real SPD-Faith paired data using Monet's official Transformers latent-mode path (`ce_patch_pos` / `ce_patch_vec`): source counterfactual latent tensors are injected into target latent positions and scored over constrained `original` / `modified` answers. Local W13 run: `runs/w13_monet_latent_patch_n50`, `n=50`, sanity pass, `latent_answer_transfer_rate=0.06` with CI `[0.00, 0.14]`. W14-W15 then upgrades all six LVR v2 primary metrics to an opt-in real generation-trace latent path. Local W14-W15 run: `runs/w14_w15_lvr_trace_latent_n50_v2`, sanity pass, `TRACE LATENT GATE VALIDATION PASSED`. Monet remains causal through Transformers latent mode only; it is still not the modified-vLLM scheduler-native generation loop.
 
 ## Why Monet Next
 
@@ -46,6 +46,7 @@ lvr-eval-mechanistic-audit/
 ├── config.maze.findings.yaml
 ├── config.monet.preflight.yaml
 ├── config.monet_latent_patch.range.yaml
+├── config.lvr_trace_latent.w14_w15.yaml
 ├── config.lvr_latent_patch.range.yaml
 ├── config.lvr_latent_patch.stepsweep.yaml
 ├── config.lvr_latent_patch.stepsweep_s2.yaml
@@ -66,6 +67,7 @@ lvr-eval-mechanistic-audit/
 │   ├── validate_w3_latent.py
 │   ├── validate_w4_stepsweep.py
 │   ├── validate_monet_latent.py
+│   ├── validate_trace_latent_gate.py
 │   ├── build_evidence_pack.py
 │   ├── build_findings_pack.py
 │   ├── check_monet_env.py
@@ -80,6 +82,7 @@ lvr-eval-mechanistic-audit/
 │   ├── validation_report_w3.md
 │   ├── validation_report_w4.md
 │   ├── validation_report_w5_w8.md
+│   ├── validation_report_w14_w15_trace_latent.md
 │   ├── findings_validation_report.md
 │   ├── evidence_pack_w5_w8.md
 │   └── findings_evidence_pack.md
@@ -103,7 +106,8 @@ lvr-eval-mechanistic-audit/
     │   │   ├── bf_conf_calibrated_progression.py
     │   │   ├── cf_stage_decay.py
     │   │   ├── lvr_latent_patch_answer_transfer.py
-    │   │   └── monet_latent_patch_answer_transfer.py
+    │   │   ├── monet_latent_patch_answer_transfer.py
+    │   │   └── trace_latent.py
     │   ├── bf3_confidence_progression.py
     │   ├── pf3_attention_distance.py
     │   ├── bf1_latent_ablation.py
@@ -180,6 +184,10 @@ W2 v2 metrics are validated as runnable-v0 gates. They are not yet full paper-gr
 7. **W13 Monet Transformers latent-mode causal range gate**
 
    `monet_latent_patch_answer_transfer` uses Monet's official Transformers latent-mode machinery. It captures `ce_patch_vec` from source/counterfactual SPD-Faith samples, injects those tensors at the target/clean sample's `ce_patch_pos`, and scores the constrained answer candidates. The local run `runs/w13_monet_latent_patch_n50` passed with `n_paired=50`, `n_success=50`, `n_error=0`, and `latent_answer_transfer_rate=0.06` (95% bootstrap CI `[0.00, 0.14]`). This moves Monet beyond preflight into causal hidden-state evidence, but the boundary remains explicit: it is not yet the modified-vLLM scheduler-native generation loop.
+
+8. **W14-W15 LVR trace-latent primary-metric gate**
+
+   `trace_latent.enabled=true` switches the six v2 primary metrics onto real LVR generation-time hidden-feedback states captured by `lvr_qwen2_5_vl_traced`. This path preserves the original metric IDs but changes the audit object from query spans to captured `output_last_position_hidden_state` tensors. Local run: `runs/w14_w15_lvr_trace_latent_n50_v2`, `n=50`, sanity pass, 20 CI rows, 32 trace-latent plots, and `TRACE LATENT GATE VALIDATION PASSED`.
 
 ## Data Sources
 
@@ -294,6 +302,37 @@ bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
   runs/w13_monet_latent_patch_n50 \
   --min-pairs 50
 ```
+
+The W14-W15 LVR trace-latent primary-metric gate:
+
+```bash
+bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
+  --config config.lvr_trace_latent.w14_w15.yaml \
+  --models lvr_7b \
+  --only pf_a_corruption_selectivity pf_b_patch_alignment \
+         bf_patch_answer_transfer bf_swap_latent_replacement \
+         bf_conf_calibrated_progression cf_stage_decay \
+  --device cuda:0 \
+  --run-name w14_w15_lvr_trace_latent_n50_v2
+
+./venv/bin/python tools/validate_trace_latent_gate.py \
+  runs/w14_w15_lvr_trace_latent_n50_v2 \
+  --min-pairs 50 \
+  --min-samples 50
+```
+
+Recorded W14-W15 primary results:
+
+| metric | primary scalar | mean | 95% bootstrap CI |
+|---|---|---:|---:|
+| PF-A | `selectivity` | -0.0382235 | [-0.0721962, -0.00607026] |
+| PF-B | `native_alignment` | 0.845704 | [0.822772, 0.866863] |
+| BF-Patch | `logprob_margin_shift` | -0.120000 | [-0.280000, 0.040000] |
+| BF-Swap | `swap_margin_shift` | -0.120000 | [-0.280000, 0.000000] |
+| BF-Conf | `gold_logit_slope` | 0.110406 | [0.0545209, 0.167702] |
+| CF-Stage | `late_delta` | -4.046318 | [-5.252559, -2.870815] |
+
+The W14-W15 validator checks that all six metric payloads are in `trace_latent` mode, that LVR traces have `trace_quality=instrumented_sparse_v0`, that BF patch/swap records applied hidden-feedback patches, that primary CI rows exist, and that trace-latent visualizations were written under `metric_plots/`.
 
 ## Trace v2
 
@@ -558,5 +597,8 @@ Legacy artifacts without group keys keep the old one-sample bootstrap fallback.
 - W3-W6 latent patching is true inference-time LVR hidden-feedback intervention on SPD-Faith constrained `original` / `modified` answers.
 - W7 remains query-span regression evidence across Qwen/LVR weights, not true latent-state intervention evidence.
 - W13 Monet is true hidden-state patching through Monet's official Transformers `latent_mode` / `ce_patch_vec` path on SPD-Faith constrained answers. It is a second-paradigm causal range gate, but not the official modified-vLLM scheduler-native generation trace.
+- W14-W15 closes the LVR-side six-primary-metric trace path at gate scale: PF-A/PF-B/BF-Patch/BF-Swap/BF-Conf/CF-Stage can all run on captured LVR generation-time hidden-feedback states when `trace_latent.enabled=true`.
+- W14-W15 is still `n=50` LVR/SPD-Faith gate evidence, not a Main-scale cross-task/cross-model matrix.
+- In W14-W15 BF-Patch/BF-Swap, LVR generation scores can be unavailable for constrained answer-token margins; those rows record a parsed-answer margin fallback while still measuring generated answer transfer and hidden-feedback patch application from the traced generation loop.
 - PF-B remains native attention-proxy alignment in the current delivered runs; DINOv3 alignment is still future work.
 - Broader tasks, larger sample sizes, modified-vLLM Monet tracing, DINO alignment, and layer-level localization remain future work.

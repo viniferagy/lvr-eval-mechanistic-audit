@@ -6,6 +6,7 @@ from dataclasses import replace
 import numpy as np
 
 from ... import internal_metrics as IM
+from . import trace_latent as TL
 from ..base import MetricSpec
 
 
@@ -21,6 +22,7 @@ def build_schema() -> dict:
         "stages": list(DEFAULT_STAGES),
         "scalars": ["early_auc", "mid_auc", "late_auc", "late_delta", "late_retention"],
         "status": "runnable_v0",
+        "trace_latent_optional": True,
     }
 
 
@@ -66,6 +68,19 @@ def _families(cfg: dict) -> dict:
 
 
 def _severity_curve(wrapper, sample, family: str, severity: float, readout: str, cfg: dict) -> dict:
+    if readout == "trace_latent":
+        processed, _image_meta = IM.prepare_image_for_audit(wrapper, sample.image)
+        image = processed if severity == 0 else IM.corrupt_image(processed, family, seed=0, severity=severity)
+        trace = TL.generate_trace(wrapper, sample, cfg, image=image, label=f"cf_stage_{family}_{severity}")
+        curve = TL.latent_norm_curve(trace)
+        return {
+            "curve": curve,
+            "trace_quality": trace.get("trace_quality"),
+            "n_lvr_mode_steps": int(trace.get("n_lvr_mode_steps") or 0),
+            "n_hidden_feedback_steps": int(trace.get("n_hidden_feedback_steps") or 0),
+            "n_captured_latent_states": int(trace.get("n_captured_latent_states") or 0),
+            "captured_state_shapes": TL.state_shape_metadata(trace),
+        }
     if readout == "pf3":
         meta = IM.pf3_curve_with_meta_from_sample(
             wrapper,
@@ -127,7 +142,7 @@ def _family_reduction(records: list[dict]) -> dict:
 
 def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
     local = _cfg(cfg)
-    readout = str(local.get("readout", "pf3"))
+    readout = "trace_latent" if TL.enabled(cfg, METRIC_ID) else str(local.get("readout", "pf3"))
     max_samples = local.get("max_samples")
     selected = samples[:int(max_samples)] if max_samples is not None else samples
     families = _families(cfg)
@@ -157,6 +172,11 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
                         "id": sample.id,
                         "family": family,
                         "severity": severity,
+                        "trace_quality": meta.get("trace_quality"),
+                        "n_lvr_mode_steps": meta.get("n_lvr_mode_steps"),
+                        "n_hidden_feedback_steps": meta.get("n_hidden_feedback_steps"),
+                        "n_captured_latent_states": meta.get("n_captured_latent_states"),
+                        "captured_state_shapes": meta.get("captured_state_shapes"),
                         "reduction": {
                             f"{key}_stage": value
                             for key, value in stages.items()
@@ -225,6 +245,12 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
         "families": family_results,
         "samples": sample_rows,
         "reduction": aggregate,
+        "config": {
+            "readout": readout,
+            "trace_latent": readout == "trace_latent",
+            "max_samples": max_samples,
+            "families": families,
+        },
     }
 
 

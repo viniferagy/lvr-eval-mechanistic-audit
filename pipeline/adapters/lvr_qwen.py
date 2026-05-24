@@ -360,6 +360,7 @@ class LVRQwenAdapter(QwenVLAdapter):
         max_new_tokens: int = 128,
         output_attentions: bool = True,
         output_hidden_states: bool = True,
+        output_scores: bool = False,
     ) -> dict:
         image = self._prepare_image(wrapper, image)
         messages = [{"role": "user", "content": [
@@ -389,6 +390,7 @@ class LVRQwenAdapter(QwenVLAdapter):
             return_dict_in_generate=True,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
+            output_scores=output_scores,
         )
 
         seq = gen.sequences[0]
@@ -422,6 +424,7 @@ class LVRQwenAdapter(QwenVLAdapter):
             "generated_text": text_out,
             "attentions": getattr(gen, "attentions", None),
             "hidden_states": getattr(gen, "hidden_states", None),
+            "scores": getattr(gen, "scores", None),
             **lvr_pos_info,
             "trace_quality": "approx_from_generated_token_ids",
             "notes": {

@@ -6,6 +6,7 @@ import random
 
 import numpy as np
 
+from . import trace_latent as TL
 from .bf_patch_answer_transfer import patch_grid, patch_one_pair
 from ..base import MetricSpec
 
@@ -23,6 +24,7 @@ def build_schema() -> dict:
         "scalars": ["swap_margin_shift", "swap_answer_transfer_rate", "n_paired"],
         "controls": ["self_swap", "reverse_swap", "random_pair_swap"],
         "status": "runnable_v0",
+        "trace_latent_optional": True,
     }
 
 
@@ -40,6 +42,7 @@ def _cell_summary(cell: dict, records: list[dict]) -> dict:
         float(r["logprob_margin_shift"])
         for r in valid
         if r.get("logprob_margin_shift") is not None
+        and np.isfinite(float(r["logprob_margin_shift"]))
     ]
     transfers = [
         float(bool(r.get("answer_transferred")))
@@ -80,7 +83,12 @@ def _flatten_sample_records(cells: list[dict], *, include_controls: bool = False
 
 def reduce_cells(cells: list[dict]) -> dict | None:
     primary_cells = [cell for cell in cells if not cell.get("control")]
-    shifts = [float(c["swap_margin_shift"]) for c in primary_cells if c.get("swap_margin_shift") is not None]
+    shifts = [
+        float(c["swap_margin_shift"])
+        for c in primary_cells
+        if c.get("swap_margin_shift") is not None
+        and np.isfinite(float(c["swap_margin_shift"]))
+    ]
     transfers = [
         float(c["swap_answer_transfer_rate"])
         for c in primary_cells
@@ -172,7 +180,83 @@ def _run_cell_records(wrapper, paired: list, cell: dict) -> list[dict]:
     return records
 
 
+def _run_trace_records(wrapper, paired: list, cfg: dict, *, patch_steps: list[str]) -> list[dict]:
+    records = []
+    for sample in paired:
+        try:
+            rec = TL.patch_pair(wrapper, sample, cfg, patch_steps=patch_steps)
+            rec["layer"] = -1
+            rec["position_bucket"] = "generation_trace"
+            records.append(rec)
+        except Exception as exc:  # noqa: BLE001
+            records.append({
+                "id": sample.id,
+                "paired_id": sample.paired_id,
+                "layer": -1,
+                "position_bucket": "generation_trace",
+                "source_answer": str(sample.counterfactual_answer),
+                "target_answer": str(sample.answer),
+                "error": repr(exc),
+            })
+    return records
+
+
+def _run_trace_latent(wrapper, samples, cfg: dict, model_tag: str) -> dict:
+    local = _cfg(cfg)
+    trace_cfg = TL.cfg(cfg)
+    controls = [str(v) for v in local.get(
+        "controls",
+        ["self_swap", "reverse_swap", "random_pair_swap"],
+    )]
+    control_seed = int(local.get("control_seed", local.get("seed", 260523)))
+    paired = [
+        sample for sample in samples
+        if sample.counterfactual_image is not None and sample.counterfactual_answer is not None
+    ]
+    max_pairs = local.get("max_pairs", trace_cfg.get("max_pairs"))
+    if max_pairs is not None:
+        paired = paired[:int(max_pairs)]
+    patch_steps = [str(v) for v in trace_cfg.get("patch_steps", ["last"])]
+    cell = {"layer": -1, "position_bucket": "generation_trace", "trace_latent": True, "patch_steps": patch_steps}
+    records = _run_trace_records(wrapper, paired, cfg, patch_steps=patch_steps)
+    cells = [_cell_summary(cell, records)]
+
+    control_cells = []
+    for control in controls:
+        control_paired = _control_samples(control, paired, control_seed)
+        control_records = _run_trace_records(wrapper, control_paired, cfg, patch_steps=patch_steps)
+        control_cells.append({
+            **_cell_summary({**cell, "control": control}, control_records),
+            "control": control,
+        })
+
+    return {
+        "model": model_tag,
+        "schema": build_schema(),
+        "config": {
+            "layers": [-1],
+            "position_buckets": ["generation_trace"],
+            "max_pairs": max_pairs,
+            "controls": controls,
+            "control_seed": control_seed,
+            "source": "counterfactual_generation_trace",
+            "target": "clean_generation_trace",
+            "primary": "paired_hidden_feedback_swap",
+            "trace_latent": True,
+            "patch_steps": patch_steps,
+        },
+        "cells": cells,
+        "control_cells": control_cells,
+        "samples": _flatten_sample_records(cells),
+        "reduction": reduce_cells(cells),
+        "n_paired": len(paired),
+    }
+
+
 def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
+    if TL.enabled(cfg, METRIC_ID):
+        return _run_trace_latent(wrapper, samples, cfg, model_tag)
+
     local = _cfg(cfg)
     layers = [int(v) for v in local.get("layers", DEFAULT_LAYERS)]
     buckets = [str(v) for v in local.get("position_buckets", DEFAULT_POSITION_BUCKETS)]

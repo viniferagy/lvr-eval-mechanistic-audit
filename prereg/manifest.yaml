@@ -157,3 +157,28 @@ gates:
     patch_steps: ["all"]
     status: "completed_range_gate"
     boundary: "causal hidden-state patching through Monet Transformers latent_mode; vLLM scheduler-native trace remains future work"
+  - gate_id: "W14_W15_lvr_trace_latent_primary_metrics"
+    model: "lvr_7b"
+    public_data: "Jackson-Lv/SPD-Faith-Bench"
+    adapter_arch: "lvr_qwen2_5_vl_traced"
+    config: "config.lvr_trace_latent.w14_w15.yaml"
+    artifact: "docs/validation_report_w14_w15_trace_latent.md"
+    run_dir: "runs/w14_w15_lvr_trace_latent_n50_v2"
+    sample_budget: 50
+    trace_quality: "instrumented_sparse_v0"
+    metrics:
+      - "pf_a_corruption_selectivity"
+      - "pf_b_patch_alignment"
+      - "bf_patch_answer_transfer"
+      - "bf_swap_latent_replacement"
+      - "bf_conf_calibrated_progression"
+      - "cf_stage_decay"
+    primary_scalars:
+      - "selectivity"
+      - "native_alignment"
+      - "logprob_margin_shift"
+      - "swap_margin_shift"
+      - "gold_logit_slope"
+      - "late_delta"
+    status: "completed_trace_latent_gate"
+    boundary: "LVR-only generation-time hidden-feedback metric upgrade at n=50; not Monet scheduler-native trace and not full Main-scale matrix"

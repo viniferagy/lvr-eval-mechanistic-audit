@@ -254,6 +254,93 @@ def plot_generic_layer_deltas(metric_id: str, model: str, payload: dict, out_dir
     _save(fig, os.path.join(out_dir, f"{_safe_name(metric_id)}_{_safe_name(model)}_layer_deltas.png"))
 
 
+def plot_trace_latent_cells(metric_id: str, model: str, payload: dict, out_dir: str):
+    cells = payload.get("cells")
+    if not isinstance(cells, list):
+        return
+    trace_cells = [
+        cell for cell in cells
+        if cell.get("trace_latent") or cell.get("position_bucket") == "generation_trace"
+    ]
+    if not trace_cells:
+        return
+    labels = []
+    shifts = []
+    transfers = []
+    for idx, cell in enumerate(trace_cells):
+        label = ",".join(str(v) for v in cell.get("patch_steps") or [idx])
+        labels.append(label)
+        shifts.append(cell.get("logprob_margin_shift", cell.get("swap_margin_shift")))
+        transfers.append(cell.get("answer_transfer_rate", cell.get("swap_answer_transfer_rate")))
+    x = np.arange(len(labels), dtype=float)
+    fig, ax1 = plt.subplots(figsize=(7, 4.5))
+    if any(v is not None for v in shifts):
+        ax1.bar(
+            x - 0.18,
+            [float(v) if v is not None else 0.0 for v in shifts],
+            width=0.36,
+            label="margin shift",
+            color="#397367",
+        )
+        ax1.set_ylabel("margin shift")
+    ax2 = ax1.twinx()
+    if any(v is not None for v in transfers):
+        ax2.plot(
+            x + 0.18,
+            [float(v) if v is not None else np.nan for v in transfers],
+            marker="o",
+            color="#b85c38",
+            label="transfer rate",
+        )
+        ax2.set_ylabel("transfer rate")
+        ax2.set_ylim(0, 1)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(labels)
+    ax1.set_xlabel("generation trace patch steps")
+    ax1.set_title(f"{metric_id} / {model} / trace-latent patch")
+    _save(fig, os.path.join(out_dir, f"{_safe_name(metric_id)}_{_safe_name(model)}_trace_latent_patch.png"))
+
+
+def plot_trace_latent_metric_matrix(metric_results: list[dict], out_dir: str):
+    rows = []
+    for envelope in metric_results:
+        payload = envelope.get("payload") or {}
+        config = payload.get("config") or {}
+        if not isinstance(payload, dict) or not config.get("trace_latent"):
+            continue
+        metric_id = str(envelope.get("metric_id"))
+        model = str(envelope.get("model"))
+        reduction = payload.get("reduction") or {}
+        for key, value in reduction.items():
+            try:
+                rows.append((metric_id, model, str(key), float(value)))
+            except (TypeError, ValueError):
+                continue
+    if not rows:
+        return
+    scalars = sorted({row[2] for row in rows})
+    metrics = sorted({row[0] for row in rows})
+    for scalar in scalars:
+        sub = [row for row in rows if row[2] == scalar]
+        if not sub:
+            continue
+        models = sorted({row[1] for row in sub})
+        matrix = np.full((len(metrics), len(models)), np.nan)
+        for metric_id, model, _scalar, value in sub:
+            matrix[metrics.index(metric_id), models.index(model)] = value
+        if np.all(np.isnan(matrix)):
+            continue
+        fig, ax = plt.subplots(figsize=(max(6, len(models) * 1.4), max(4, len(metrics) * 0.55)))
+        im = ax.imshow(matrix, aspect="auto", cmap="viridis")
+        ax.set_xticks(np.arange(len(models)))
+        ax.set_xticklabels(models, rotation=25, ha="right")
+        ax.set_yticks(np.arange(len(metrics)))
+        ax.set_yticklabels(metrics)
+        ax.set_title(f"Trace-latent metric matrix: {scalar}")
+        fig.colorbar(im, ax=ax, shrink=0.8)
+        _save(fig, os.path.join(out_dir, f"trace_latent_matrix_{_safe_name(scalar)}.png"))
+
+
 def plot_generic_metric_results(metric_results: list[dict], out_dir: str):
     """Create metric-id based plots without assuming BF-1/CF-2 file names."""
     if not metric_results:
@@ -285,6 +372,7 @@ def plot_generic_metric_results(metric_results: list[dict], out_dir: str):
             plot_generic_curve(metric_id, model, "curve", payload.get("curve"), generic_dir)
 
         plot_generic_layer_deltas(metric_id, model, payload, generic_dir)
+        plot_trace_latent_cells(metric_id, model, payload, generic_dir)
 
         families = payload.get("families")
         if isinstance(families, dict):
@@ -302,6 +390,7 @@ def plot_generic_metric_results(metric_results: list[dict], out_dir: str):
 
     with open(os.path.join(out_dir, "metric_results_summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
+    plot_trace_latent_metric_matrix(metric_results, generic_dir)
 
 
 def _record_group_key(record: dict) -> str | None:

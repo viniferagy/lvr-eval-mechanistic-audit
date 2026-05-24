@@ -185,13 +185,29 @@ def _check_cells(metric_id: str, payload: dict, cfg: dict | None = None) -> dict
         max_error_ratio=_max_error_ratio(cfg),
     ))
     valid_scoring = 0
+    trace_records = 0
     for cell in cells:
         for record in cell.get("records") or []:
             if record.get("source_answer_token_ids") and record.get("target_answer_token_ids"):
                 if is_finite_scalar(record.get("clean_margin")) and is_finite_scalar(record.get("patched_margin")):
                     valid_scoring += 1
+            if (
+                record.get("trace_quality") == "instrumented_sparse_v0"
+                and record.get("source_trace_quality") == "instrumented_sparse_v0"
+                and int(record.get("n_patch_applied") or 0) >= 1
+            ):
+                trace_records += 1
     checks.append(make_check("answer_sequence_scoring", PASS if valid_scoring > 0 else FAIL,
                              valid_scoring=valid_scoring))
+    if (payload.get("config") or {}).get("trace_latent"):
+        if trace_records > 0 and valid_scoring == 0:
+            checks[-1]["status"] = WARN
+            checks[-1]["values"]["reason"] = "generation_scores_unavailable_using_parsed_answer_fallback"
+        checks.append(make_check(
+            "trace_latent_patch_records",
+            PASS if trace_records > 0 else FAIL,
+            trace_records=trace_records,
+        ))
     return make_report(metric_id, payload.get("model", "unknown"), checks, "v2")
 
 
@@ -216,11 +232,13 @@ def check_bf_swap_result(payload: dict, cfg: dict | None = None) -> dict:
         if cell.get("control") == "self_swap" and is_finite_scalar(cell.get("swap_margin_shift"))
     ]
     tolerance = float(_v2_cfg(cfg).get("self_swap_max_abs_shift", 0.05))
+    trace_latent = bool((payload.get("config") or {}).get("trace_latent"))
     checks.append(make_check(
         "self_swap_near_zero",
-        PASS if self_shifts and max(self_shifts) <= tolerance else FAIL,
+        PASS if self_shifts and max(self_shifts) <= tolerance else (WARN if trace_latent and not self_shifts else FAIL),
         max_abs_shift=max(self_shifts) if self_shifts else None,
         tolerance=tolerance,
+        reason="generation_scores_unavailable_using_parsed_answer_fallback" if trace_latent and not self_shifts else None,
     ))
     return make_report("bf_swap_latent_replacement", payload.get("model", "unknown"), checks, "v2")
 

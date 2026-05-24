@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 
 from ... import internal_metrics as IM
+from . import trace_latent as TL
 from .bf_patch_answer_transfer import _answer_token_id, _model_forward
 from ..base import MetricSpec
 
@@ -24,6 +25,7 @@ def build_schema() -> dict:
             "text_only_control_rate",
         ],
         "status": "runnable_v0",
+        "trace_latent_optional": True,
     }
 
 
@@ -110,7 +112,64 @@ def _aggregate(samples: list[dict]) -> dict | None:
     return out
 
 
+def _run_trace_latent(wrapper, samples, cfg: dict, model_tag: str) -> dict:
+    per_sample = []
+    for sample in samples:
+        try:
+            trace = TL.generate_trace(wrapper, sample, cfg, label="bf_conf")
+            answer_logits = TL.latent_answer_logit_curve(wrapper, trace, sample.answer)
+            if not answer_logits and sample.counterfactual_answer is not None:
+                answer_logits = TL.latent_answer_logit_curve(wrapper, trace, sample.counterfactual_answer)
+            curve = answer_logits or TL.latent_norm_curve(trace)
+            reduction = {
+                "early_to_late_drop": (
+                    float(curve[0] - curve[-1]) if len(curve) >= 2 else None
+                ),
+                "final_entropy": None,
+                "mean_entropy": float(np.mean(curve)) if curve else None,
+                "gold_logit_slope": TL.safe_slope(answer_logits),
+            }
+            per_sample.append({
+                "id": sample.id,
+                "curve": [float(v) for v in curve],
+                "answer_token_id": TL.first_token_id(wrapper, sample.answer),
+                "gold_logit_by_layer": [float(v) for v in answer_logits],
+                "reduction": reduction,
+                "query_target_kind": "generation_trace_latent_state",
+                "query_span": None,
+                "image_span": None,
+                "trace_quality": trace.get("trace_quality"),
+                "n_lvr_mode_steps": int(trace.get("n_lvr_mode_steps") or 0),
+                "n_hidden_feedback_steps": int(trace.get("n_hidden_feedback_steps") or 0),
+                "n_captured_latent_states": int(trace.get("n_captured_latent_states") or 0),
+                "captured_state_shapes": TL.state_shape_metadata(trace),
+                "text_only_control": {
+                    "enabled": False,
+                    "available": False,
+                    "reason": "trace_latent_generation_path",
+                },
+            })
+        except Exception as exc:  # noqa: BLE001
+            per_sample.append({"id": sample.id, "error": repr(exc)})
+    aggregate_curve = (
+        np.mean(np.stack([np.asarray(s["curve"], dtype=float) for s in per_sample if s.get("curve")]), axis=0)
+        if any(s.get("curve") for s in per_sample)
+        else None
+    )
+    return {
+        "model": model_tag,
+        "schema": build_schema(),
+        "curve": aggregate_curve.tolist() if aggregate_curve is not None else None,
+        "samples": per_sample,
+        "reduction": _aggregate(per_sample),
+        "config": {"text_only_control": False, "trace_latent": True},
+    }
+
+
 def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
+    if TL.enabled(cfg, METRIC_ID):
+        return _run_trace_latent(wrapper, samples, cfg, model_tag)
+
     local = _cfg(cfg)
     text_only_enabled = bool(local.get("text_only_control", True))
     per_sample = []

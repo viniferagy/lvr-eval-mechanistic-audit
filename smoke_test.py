@@ -56,6 +56,7 @@ from pipeline.metrics.v2.monet_latent_patch_answer_transfer import (
     reduce_records as reduce_monet_latent_records,
 )
 from pipeline.metrics.v2.pf_b_patch_alignment import run as run_pf_b_metric
+from pipeline.metrics.v2 import trace_latent as TL
 from pipeline.metrics.lvr_generation_trace import run as run_lvr_trace_metric
 from pipeline.preregistration import build_lock_payload, hash_manifest, load_manifest
 from pipeline.results import make_metric_result
@@ -78,6 +79,7 @@ from tools.prepare_maze_planning_hf import main as prepare_maze_planning_hf_main
 from tools.prepare_monet_sft_hf import extract_prompt_answer, strip_latent_tokens
 from tools.validate_findings_gate import main as validate_findings_gate_main
 from tools.validate_monet_latent import main as validate_monet_latent_main
+from tools.validate_trace_latent_gate import main as validate_trace_latent_gate_main
 from tools.validate_w3_latent import main as validate_w3_latent_main
 from tools.validate_w4_stepsweep import main as validate_w4_stepsweep_main
 from run_all import metric_enabled, selected_metric_ids
@@ -2034,6 +2036,179 @@ def test_validate_monet_latent_fixture():
     print("  Monet latent validator accepts/rejects fixtures -> ok")
 
 
+def test_trace_latent_w14_w15_fixtures():
+    print("\n== 10n. W14/W15 trace-latent fixtures ==")
+    import torch
+    import torch.nn as nn
+    from pipeline.data import ProbeSample
+
+    class TinyTokenizer:
+        vocab = {"original": 1, "modified": 2}
+
+        def encode(self, text, add_special_tokens=False):
+            return [self.vocab.get(str(text).strip().lower(), 1)]
+
+        def decode(self, ids, skip_special_tokens=True):
+            inv = {v: k for k, v in self.vocab.items()}
+            return inv.get(int(ids[0]), str(ids[0]))
+
+    class TinyModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.device = torch.device("cpu")
+            self.lm_head = nn.Linear(4, 4, bias=False)
+            with torch.no_grad():
+                self.lm_head.weight.zero_()
+                self.lm_head.weight[1, 0] = -1.0
+                self.lm_head.weight[2, 0] = 1.0
+
+    class TinyTraceAdapter:
+        def generate_with_trace(self, wrapper, image, question, **kwargs):
+            patch_states = (kwargs.get("trace_capture") or {}).get("patch_states")
+            is_source = float(np.asarray(image.convert("RGB")).mean()) < 128.0
+            value = 2.0 if is_source else -1.0
+            if patch_states:
+                value = float(patch_states[0].reshape(-1)[0])
+            tensors = [
+                torch.full((1, 4), value - 0.2),
+                torch.full((1, 4), value),
+                torch.full((1, 4), value + 0.2),
+            ]
+            scores = [torch.zeros(1, 4)]
+            scores[-1][0, 1] = -value
+            scores[-1][0, 2] = value
+            generated = "modified" if value > 0 else "original"
+            return {
+                "generated_text": generated,
+                "scores": scores,
+                "trace_quality": "instrumented_sparse_v0",
+                "missing_modules": [],
+                "trace_v2_error": None,
+                "n_lvr_mode_steps": 1,
+                "n_hidden_feedback_steps": 1,
+                "n_captured_latent_states": len(tensors),
+                "n_patch_applied": 1 if patch_states else 0,
+                "captured_state_metadata": [
+                    {
+                        "kind": "output_last_position_hidden_state",
+                        "step_index": idx,
+                        "shape": [1, 4],
+                    }
+                    for idx, _tensor in enumerate(tensors)
+                ],
+                "_captured_states": [
+                    {
+                        "kind": "output_last_position_hidden_state",
+                        "step_index": idx,
+                        "shape": [1, 4],
+                        "tensor": tensor,
+                    }
+                    for idx, tensor in enumerate(tensors)
+                ],
+            }
+
+    wrapper = SimpleNamespace(
+        model=TinyModel(),
+        processor=SimpleNamespace(tokenizer=TinyTokenizer()),
+        adapter=TinyTraceAdapter(),
+        final_norm=None,
+        lm_head=None,
+    )
+    wrapper.lm_head = wrapper.model.lm_head
+    sample = ProbeSample(
+        id="pair0",
+        image=Image.new("RGB", (8, 8), "white"),
+        question="q target",
+        answer="original",
+        counterfactual_image=Image.new("RGB", (8, 8), "black"),
+        counterfactual_answer="modified",
+        paired_id="pair0",
+        bboxes=[[0, 0, 0.5, 0.5]],
+    )
+    cfg = {
+        "trace_v2": {"required": True, "forbid_fallback": True},
+        "trace_latent": {
+            "enabled": True,
+            "required": True,
+            "forbid_fallback": True,
+            "patch_steps": ["last"],
+            "apply_to": "all",
+        },
+        "validation": {
+            "v2": {
+                "min_samples": 1,
+                "min_pairs": 1,
+                "allow_center_fallback": True,
+                "self_swap_max_abs_shift": 10.0,
+            },
+            "bf3": {"min_layers": 1},
+        },
+        "pf_a": {"seed": 1},
+        "pf_b": {"seed": 1, "use_dino": False},
+        "bf_patch": {"max_pairs": 1},
+        "bf_swap": {"max_pairs": 1, "controls": ["self_swap", "reverse_swap", "random_pair_swap"]},
+        "cf_stage": {"families": {"mask": [0.4]}},
+    }
+    assert TL.enabled(cfg, "pf_a_corruption_selectivity")
+    patch_rec = TL.patch_pair(wrapper, sample, cfg)
+    assert patch_rec["answer_transferred"] is True
+    assert patch_rec["logprob_margin_shift"] is not None
+
+    payloads = {
+        "pf_a_corruption_selectivity": run_pf_a_metric(wrapper, [sample], cfg, "lvr_7b"),
+        "pf_b_patch_alignment": run_pf_b_metric(wrapper, [sample], cfg, "lvr_7b"),
+        "bf_patch_answer_transfer": run_bf_patch_metric(wrapper, [sample], cfg, "lvr_7b"),
+        "bf_swap_latent_replacement": run_bf_swap_metric(wrapper, [sample, ProbeSample(
+            id="pair1",
+            image=Image.new("RGB", (8, 8), "white"),
+            question="q target",
+            answer="original",
+            counterfactual_image=Image.new("RGB", (8, 8), "black"),
+            counterfactual_answer="modified",
+            paired_id="pair1",
+            bboxes=[[0, 0, 0.5, 0.5]],
+        )], cfg, "lvr_7b"),
+        "bf_conf_calibrated_progression": run_bf_conf_metric(wrapper, [sample], cfg, "lvr_7b"),
+    }
+    cfg_cf = {**cfg, "trace_latent": {**cfg["trace_latent"], "apply_to": ["cf_stage_decay"]}}
+    payloads["cf_stage_decay"] = __import__(
+        "pipeline.metrics.v2.cf_stage_decay",
+        fromlist=["run"],
+    ).run(wrapper, [sample], cfg_cf, "lvr_7b")
+
+    for metric_id, payload in payloads.items():
+        assert (payload.get("config") or {}).get("trace_latent") is True, metric_id
+        reports = run_sanity_for_metric_result(metric_id, payload, cfg)
+        assert reports and not has_failed_checks(reports), metric_id
+
+    run_dir = Path(tempfile.mkdtemp(prefix="trace_latent_gate_"))
+    (run_dir / "metrics").mkdir()
+    (run_dir / "sanity").mkdir()
+    metric_results = []
+    for metric_id, payload in payloads.items():
+        envelope = make_metric_result(metric_id, "lvr_7b", payload)
+        metric_results.append(envelope)
+        (run_dir / "metrics" / f"{metric_id}_lvr_7b.json").write_text(
+            json.dumps(envelope, indent=2),
+            encoding="utf-8",
+        )
+    (run_dir / "summary_with_ci.json").write_text(
+        json.dumps(build_summary_with_ci(metric_results, seed=1), indent=2),
+        encoding="utf-8",
+    )
+    sanity = []
+    for metric_id, payload in payloads.items():
+        sanity.extend(run_sanity_for_metric_result(metric_id, payload, cfg))
+    save_sanity_reports(sanity, str(run_dir))
+    run_analysis({}, {}, str(run_dir), metric_results=metric_results)
+    validate_trace_latent_gate_main([str(run_dir), "--min-pairs", "1", "--min-samples", "1"])
+
+    cfg_file = yaml.safe_load(Path("config.lvr_trace_latent.w14_w15.yaml").read_text(encoding="utf-8"))
+    assert cfg_file["models"]["lvr_7b"]["arch"] == "lvr_qwen2_5_vl_traced"
+    assert cfg_file["trace_latent"]["enabled"] is True
+    print("  trace-latent metrics, sanity, validator, and plots -> ok")
+
+
 def test_bf1_does_not_cache_gpu_inputs_static():
     print("\n== 11. BF-1 targeted cache policy ==")
     import inspect
@@ -2153,6 +2328,7 @@ def main():
     test_monet_preflight_wiring()
     test_monet_latent_gate_wiring()
     test_validate_monet_latent_fixture()
+    test_trace_latent_w14_w15_fixtures()
     test_bf1_does_not_cache_gpu_inputs_static()
     test_end_to_end()
     print("\nSMOKE TEST PASSED ✅")

@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 
 from ...adapters.spans import TokenSpan
+from . import trace_latent as TL
 from ..base import MetricSpec
 
 try:
@@ -47,6 +48,7 @@ def build_schema() -> dict:
         "grid": patch_grid(),
         "scalars": ["logprob_margin_shift", "answer_transfer_rate", "n_paired"],
         "status": "runnable_v0",
+        "trace_latent_optional": True,
     }
 
 
@@ -399,6 +401,7 @@ def _cell_summary(cell: dict, records: list[dict]) -> dict:
         float(r["logprob_margin_shift"])
         for r in records
         if r.get("logprob_margin_shift") is not None
+        and np.isfinite(float(r["logprob_margin_shift"]))
     ]
     return {
         **cell,
@@ -407,7 +410,11 @@ def _cell_summary(cell: dict, records: list[dict]) -> dict:
             float(r["logit_margin_shift"])
             for r in records
             if r.get("logit_margin_shift") is not None
-        ])) if any(r.get("logit_margin_shift") is not None for r in records) else None,
+            and np.isfinite(float(r["logit_margin_shift"]))
+        ])) if any(
+            r.get("logit_margin_shift") is not None and np.isfinite(float(r["logit_margin_shift"]))
+            for r in records
+        ) else None,
         "answer_transfer_rate": answer_transfer_rate(records),
         "n_paired": len(records),
         "n_success": sum(1 for r in records if r.get("error") is None),
@@ -417,7 +424,12 @@ def _cell_summary(cell: dict, records: list[dict]) -> dict:
 
 
 def reduce_cells(cells: list[dict]) -> dict | None:
-    shifts = [float(c["logprob_margin_shift"]) for c in cells if c.get("logprob_margin_shift") is not None]
+    shifts = [
+        float(c["logprob_margin_shift"])
+        for c in cells
+        if c.get("logprob_margin_shift") is not None
+        and np.isfinite(float(c["logprob_margin_shift"]))
+    ]
     transfers = [
         float(c["answer_transfer_rate"])
         for c in cells
@@ -428,8 +440,13 @@ def reduce_cells(cells: list[dict]) -> dict | None:
     return {
         "logprob_margin_shift": float(np.mean(shifts)) if shifts else None,
         "logit_margin_shift": float(np.mean([
-            float(c["logit_margin_shift"]) for c in cells if c.get("logit_margin_shift") is not None
-        ])) if any(c.get("logit_margin_shift") is not None for c in cells) else None,
+            float(c["logit_margin_shift"]) for c in cells
+            if c.get("logit_margin_shift") is not None
+            and np.isfinite(float(c["logit_margin_shift"]))
+        ])) if any(
+            c.get("logit_margin_shift") is not None and np.isfinite(float(c["logit_margin_shift"]))
+            for c in cells
+        ) else None,
         "answer_transfer_rate": float(np.mean(transfers)) if transfers else None,
         "n_paired": int(max((c.get("n_paired", 0) for c in cells), default=0)),
         "n_cells": len(cells),
@@ -460,6 +477,9 @@ def _flatten_sample_records(cells: list[dict]) -> list[dict]:
 
 
 def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
+    if TL.enabled(cfg, METRIC_ID):
+        return _run_trace_latent(wrapper, samples, cfg, model_tag)
+
     bf_cfg = _cfg(cfg)
     layers = _to_int_list(bf_cfg.get("layers"), DEFAULT_LAYERS)
     buckets = _to_str_list(bf_cfg.get("position_buckets"), DEFAULT_POSITION_BUCKETS)
@@ -506,6 +526,66 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
             "max_pairs": max_pairs,
             "source": "counterfactual",
             "target": "clean",
+        },
+        "cells": cells,
+        "samples": _flatten_sample_records(cells),
+        "reduction": reduce_cells(cells),
+        "n_paired": len(paired),
+    }
+
+
+def _run_trace_latent(wrapper, samples, cfg: dict, model_tag: str) -> dict:
+    local = _cfg(cfg)
+    trace_cfg = TL.cfg(cfg)
+    paired = [
+        sample for sample in samples
+        if sample.counterfactual_image is not None and sample.counterfactual_answer is not None
+    ]
+    max_pairs = local.get("max_pairs", trace_cfg.get("max_pairs"))
+    if max_pairs is not None:
+        paired = paired[:int(max_pairs)]
+
+    patch_steps = [str(v) for v in trace_cfg.get("patch_steps", ["last"])]
+    records = []
+    for sample in paired:
+        try:
+            records.append(TL.patch_pair(wrapper, sample, cfg, patch_steps=patch_steps))
+        except Exception as exc:  # noqa: BLE001
+            records.append({
+                "id": sample.id,
+                "paired_id": sample.paired_id,
+                "layer": -1,
+                "position_bucket": "generation_trace",
+                "source_answer": str(sample.counterfactual_answer),
+                "target_answer": str(sample.answer),
+                "patched_answer": None,
+                "logprob_margin_shift": None,
+                "logit_margin_shift": None,
+                "error": repr(exc),
+            })
+    cell = _cell_summary(
+        {
+            "layer": -1,
+            "position_bucket": "generation_trace",
+            "patch_steps": patch_steps,
+            "trace_latent": True,
+        },
+        records,
+    )
+    cells = [cell]
+    return {
+        "model": model_tag,
+        "schema": build_schema(),
+        "config": {
+            "layers": [-1],
+            "position_buckets": ["generation_trace"],
+            "max_pairs": max_pairs,
+            "source": "counterfactual_generation_trace",
+            "target": "clean_generation_trace",
+            "trace_latent": True,
+            "patch_steps": patch_steps,
+            "patch_tensor": "output_last_position_hidden_state",
+            "intervention_site": "forward_pre.last_position_hidden_state",
         },
         "cells": cells,
         "samples": _flatten_sample_records(cells),
