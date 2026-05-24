@@ -41,6 +41,8 @@ lvr-eval-mechanistic-audit/
 │   ├── validate_w3_latent.py
 │   ├── validate_w4_stepsweep.py
 │   ├── build_evidence_pack.py
+│   ├── check_lvr_env.py
+│   ├── compare_capacity_sweep.py
 │   ├── run_and_hold.sh
 │   └── hold_gpu.py
 ├── docs/
@@ -150,6 +152,13 @@ Supported `data.source_type` values include:
 
 `spd_faith` is the paired counterfactual entry point used for the W2 range gate. It expects fields for clean/counterfactual images, clean/counterfactual answers, `paired_id`, and either bbox or region-mask oracle metadata.
 
+Check the local LVR model and external `VincentLeebang/lvr` checkout without loading model weights:
+
+```bash
+./venv/bin/python tools/check_lvr_env.py \
+  --config config.lvr_latent_patch.stepsweep.yaml
+```
+
 Prepare the canonical local SPD-Faith manifest from the public Hugging Face dataset:
 
 ```bash
@@ -188,6 +197,8 @@ trace_v2:
 ```
 
 `config.trace_v2.yaml` runs the trace gate on LVR JSON samples. The trace metric now hard-fails when trace v2 is required but sparse instrumentation falls back, reports missing modules, or does not return `trace_quality=instrumented_sparse_v0`.
+
+The W3-W6 latent patch configs also set `trace_v2.required=true`, `trace_v2.forbid_fallback=true`, and `lvr_latent_patch.patch_shape_policy="strict"`. Shape mismatches at the hidden-feedback injection site fail by default instead of silently slicing tensors.
 
 The SPD range config intentionally does not use traced latent-state intervention. It runs paired query-span interventions on SPD-Faith for Qwen/LVR-weight comparison.
 
@@ -314,6 +325,12 @@ bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
   runs/w5_lvr_capacity_s16_n50 \
   --min-pairs 50 \
   --min-steps 1
+
+./venv/bin/python tools/compare_capacity_sweep.py \
+  runs/w5_lvr_capacity_s2_n50 \
+  runs/w5_lvr_capacity_s4_n50 \
+  runs/w5_lvr_capacity_s8_n50 \
+  runs/w5_lvr_capacity_s16_n50
 ```
 
 W6 best-step replication:
@@ -351,12 +368,10 @@ bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
 W8 evidence pack:
 
 ```bash
-./venv/bin/python tools/build_evidence_pack.py \
-  --w5 runs/w5_lvr_capacity_s2_n50 runs/w5_lvr_capacity_s4_n50 \
-       runs/w5_lvr_capacity_s8_n50 runs/w5_lvr_capacity_s16_n50 \
-  --w6 runs/w6_lvr_beststep4_s8_n50 \
-  --w7 runs/w7_spd_scale_m0_m1_m2_n200
+./venv/bin/python tools/build_evidence_pack.py
 ```
+
+The builder is fail-fast by default: missing metric JSON, missing or non-pass sanity summaries, missing W7 CI rows, and invalid W5 capacity sweep artifacts abort generation. `--allow-missing` is available only for legacy/local drafting.
 
 Recorded W5-W8 results:
 
@@ -366,6 +381,8 @@ Recorded W5-W8 results:
 | W6 best step | step 4 targeted patch passed with `latent_answer_transfer_rate=0.60` |
 | W7 SPD scale-up | 18/18 sanity pass, 66 CI rows, paired BF metrics `200/0` success/error per model |
 | W8 evidence pack | [docs/evidence_pack_w5_w8.md](/home/pengguangyue/workspace/proj/lvr-eval-mechanistic-audit/docs/evidence_pack_w5_w8.md) |
+
+`prereg/manifest.yaml` is synchronized to `manifest_version: 0.8-w8-evidence-package`; it preserves the six W2 primary metrics and records W5, W6, W7, and W8 as completed gates.
 
 See [docs/validation_report_w5_w8.md](/home/pengguangyue/workspace/proj/lvr-eval-mechanistic-audit/docs/validation_report_w5_w8.md) for exact commands, reductions, and validators.
 
@@ -378,6 +395,9 @@ Legacy artifacts without group keys keep the old one-sample bootstrap fallback.
 ## Known Boundaries
 
 - W2-W8 are reproducibility, localization, capacity, and scale-up gates, not a final causal-result package.
+- W8 is an engineering/review evidence package, not a claim-finalizing result.
+- W5 capacity sweep passed validation, but it does not establish monotonic capacity scaling.
+- W6 best-step replication is an `n=50` gate-level replication, not a full replication study.
 - `pf_b_patch_alignment` currently reports native attention-proxy alignment; DINO patch correspondence remains optional and disabled for the W2 gate.
 - `bf_swap_latent_replacement` now records self-swap, reverse-swap, and random-pair controls, but stronger controlled latent-block protocols are still needed.
 - `cf_stage_decay` uses `late_delta` as the primary scalar; `late_retention` can explode when the clean late-stage baseline is near zero and is diagnostic only.

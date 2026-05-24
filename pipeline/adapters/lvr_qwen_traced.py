@@ -73,6 +73,7 @@ class TraceRecorder:
     capture_device_policy: str = "cpu_float32"
     patch_states: list[Any] | None = None
     patch_steps: set[int] | None = None
+    patch_shape_policy: str = "strict"
     handles: list[Any] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
     captured_states: list[dict[str, Any]] = field(default_factory=list)
@@ -138,6 +139,11 @@ class TraceRecorder:
         if repl.dim() == current.dim() - 1:
             repl = repl.unsqueeze(0)
         if repl.shape != patched.shape:
+            if self.patch_shape_policy != "slice":
+                raise RuntimeError(
+                    "latent patch shape mismatch under strict policy: "
+                    f"current={tuple(patched.shape)} replacement={tuple(repl.shape)}"
+                )
             slices = tuple(slice(0, min(a, b)) for a, b in zip(patched.shape, repl.shape))
             patched[slices] = repl[slices]
         else:
@@ -395,6 +401,7 @@ class TracedLVRQwenAdapter(LVRQwenAdapter):
         max_captured = int(trace_capture.get("max_captured_tensors", 16))
         patch_states = trace_capture.get("patch_states")
         patch_steps = trace_capture.get("patch_steps")
+        patch_shape_policy = str(trace_capture.get("patch_shape_policy", "strict"))
         if patch_steps is not None:
             patch_steps = {int(step) for step in patch_steps}
         try:
@@ -404,6 +411,7 @@ class TracedLVRQwenAdapter(LVRQwenAdapter):
                 max_captured_tensors=max_captured,
                 patch_states=patch_states,
                 patch_steps=patch_steps,
+                patch_shape_policy=patch_shape_policy,
             ) as recorder:
                 trace = super().generate_with_trace(wrapper, image, question, **kwargs)
             sparse = recorder.summary()

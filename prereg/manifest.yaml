@@ -1,6 +1,6 @@
-manifest_version: "0.2-w2-final-gate"
+manifest_version: "0.8-w8-evidence-package"
 project: "LatentFaith-Audit"
-created_for: "week2_final_gate"
+created_for: "w8_evidence_package"
 analysis_blind_seed: 260523
 stopping_rule:
   description: "Run the preregistered sample budget per model/task unless failures are attributable to missing local data or model weights."
@@ -57,4 +57,36 @@ statistics:
     paired: true
   mixed_effects:
     formula: "metric_value ~ model + task + (1|sample_id)"
-    status: "planned_not_required_for_w2_final_gate"
+    status: "planned_not_required_for_w8_gate"
+gates:
+  - gate_id: "W5_capacity_sweep"
+    metric_id: "lvr_latent_patch_answer_transfer"
+    primary_scalars:
+      - "best_step_transfer_rate"
+      - "step_transfer_auc"
+    sample_budget: 50
+    lvr_steps: [2, 4, 8, 16]
+    status: "completed_gate"
+  - gate_id: "W6_best_step_replication"
+    metric_id: "lvr_latent_patch_answer_transfer"
+    primary_scalar: "latent_answer_transfer_rate"
+    sample_budget: 50
+    patch_step: 4
+    status: "completed_gate"
+  - gate_id: "W7_spd_scale_regression"
+    metrics:
+      - "pf_a_corruption_selectivity"
+      - "pf_b_patch_alignment"
+      - "bf_patch_answer_transfer"
+      - "bf_swap_latent_replacement"
+      - "bf_conf_calibrated_progression"
+      - "cf_stage_decay"
+    sample_budget: 200
+    models:
+      - "qwen2_5_vl_3b"
+      - "qwen2_5_vl_7b"
+      - "lvr_7b"
+    status: "completed_regression_gate"
+  - gate_id: "W8_evidence_pack"
+    artifact: "docs/evidence_pack_w5_w8.md"
+    status: "completed_packaging_gate"

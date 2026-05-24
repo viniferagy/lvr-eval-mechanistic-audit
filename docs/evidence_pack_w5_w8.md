@@ -14,10 +14,10 @@ This file is generated from local run artifacts. It summarizes gate-level eviden
 
 | run_dir | sanity | key reductions |
 |---|---|---|
-| `runs/w5_lvr_capacity_s2_n50` | pass | `{"best_step_index": 3, "best_step_transfer_rate": 0.44, "last_step_transfer_rate": 0.44, "n_paired": 50, "n_steps_evaluated": 2, "step_transfer_auc": 0.42000000000000004}` |
-| `runs/w5_lvr_capacity_s4_n50` | pass | `{"best_step_index": 4, "best_step_transfer_rate": 0.52, "last_step_transfer_rate": 0.42, "n_paired": 50, "n_steps_evaluated": 4, "step_transfer_auc": 0.4666666666666666}` |
-| `runs/w5_lvr_capacity_s8_n50` | pass | `{"best_step_index": 4, "best_step_transfer_rate": 0.44, "last_step_transfer_rate": 0.42, "n_paired": 50, "n_steps_evaluated": 6, "step_transfer_auc": 0.42400000000000004}` |
-| `runs/w5_lvr_capacity_s16_n50` | pass | `{"best_step_index": 4, "best_step_transfer_rate": 0.48, "last_step_transfer_rate": 0.46, "n_paired": 50, "n_steps_evaluated": 10, "step_transfer_auc": 0.4444444444444444}` |
+| `runs/w5_lvr_capacity_s2_n50` | pass | `{"best_step_index": 3, "best_step_transfer_rate": 0.44, "last_step_transfer_rate": 0.44, "n_paired": 50, "n_steps_evaluated": 2, "n_success": 50, "step_transfer_auc": 0.42000000000000004}` |
+| `runs/w5_lvr_capacity_s4_n50` | pass | `{"best_step_index": 4, "best_step_transfer_rate": 0.52, "last_step_transfer_rate": 0.42, "n_paired": 50, "n_steps_evaluated": 4, "n_success": 50, "step_transfer_auc": 0.4666666666666666}` |
+| `runs/w5_lvr_capacity_s8_n50` | pass | `{"best_step_index": 4, "best_step_transfer_rate": 0.44, "last_step_transfer_rate": 0.42, "n_paired": 50, "n_steps_evaluated": 6, "n_success": 50, "step_transfer_auc": 0.42400000000000004}` |
+| `runs/w5_lvr_capacity_s16_n50` | pass | `{"best_step_index": 4, "best_step_transfer_rate": 0.48, "last_step_transfer_rate": 0.46, "n_paired": 50, "n_steps_evaluated": 10, "n_success": 50, "step_transfer_auc": 0.4444444444444444}` |
 
 ## W7 SPD Regression Scale-Up
 
@@ -27,4 +27,4 @@ This file is generated from local run artifacts. It summarizes gate-level eviden
 
 ## Boundary Statement
 
-W3-W6 are true inference-time LVR hidden-feedback intervention gates on SPD-Faith constrained answers. W7 remains query-span regression evidence across Qwen/LVR weights. Broader-task and layer-level localization remain future work.
+W3-W6 are true inference-time LVR hidden-feedback intervention gates on SPD-Faith constrained answers. W7 remains query-span regression evidence across Qwen/LVR weights. W5 capacity validation does not establish monotonic capacity scaling. Broader-task, larger-n, and layer-level localization remain future work.

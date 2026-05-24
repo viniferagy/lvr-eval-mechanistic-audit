@@ -43,6 +43,8 @@ from pipeline.metrics.v2.bf_conf_calibrated_progression import run as run_bf_con
 from pipeline.metrics.v2.bf_swap_latent_replacement import run as run_bf_swap_metric
 from pipeline.metrics.v2.cf_stage_decay import stage_reduce
 from pipeline.metrics.v2.lvr_latent_patch_answer_transfer import (
+    TracePolicyViolation,
+    _assert_trace_ok,
     parse_candidate,
     reduce_records as reduce_w3_latent_records,
 )
@@ -676,6 +678,35 @@ def test_trace_recorder_tensor_capture_and_patch():
         )
     assert patched.summary()["n_patch_applied"] == 1
     assert float(out.last_position_hidden_state[0, 0]) == 6.0
+    try:
+        with TraceRecorder(
+            wrapper,
+            capture_tensors=True,
+            patch_states=[torch.full((1, 3), 5.0)],
+            patch_steps={0},
+        ):
+            model(
+                input_ids=torch.tensor([[2]]),
+                lvr_mode_switch=torch.tensor([True]),
+                last_position_hidden_state=torch.zeros(1, 4),
+            )
+        raise AssertionError("strict patch shape policy should reject mismatched tensors")
+    except RuntimeError as exc:
+        assert "shape mismatch" in str(exc)
+    with TraceRecorder(
+        wrapper,
+        capture_tensors=True,
+        patch_states=[torch.full((1, 3), 7.0)],
+        patch_steps={0},
+        patch_shape_policy="slice",
+    ) as sliced:
+        out = model(
+            input_ids=torch.tensor([[2]]),
+            lvr_mode_switch=torch.tensor([True]),
+            last_position_hidden_state=torch.zeros(1, 4),
+        )
+    assert sliced.summary()["n_patch_applied"] == 1
+    assert float(out.last_position_hidden_state[0, 0]) == 8.0
     print("  TraceRecorder captures latent tensors and patches selected steps -> ok")
 
 
@@ -1483,13 +1514,35 @@ def test_w5_w8_tooling_fixtures():
 
     run_a = Path(tempfile.mkdtemp(prefix="w5_capacity_a_"))
     run_b = Path(tempfile.mkdtemp(prefix="w5_capacity_b_"))
+    run_w7 = Path(tempfile.mkdtemp(prefix="w7_scale_"))
     write_latent_run(run_a, 2)
     write_latent_run(run_b, 4)
+    (run_w7 / "sanity").mkdir()
+    (run_w7 / "sanity" / "summary_sanity.json").write_text(json.dumps({"overall_status": "pass"}))
+    (run_w7 / "summary_with_ci.json").write_text(json.dumps([
+        {"metric_id": "pf_a_corruption_selectivity", "model": "lvr_7b", "scalar": "selectivity", "n": 1}
+    ]))
 
     import sys
 
     old_argv = sys.argv
     try:
+        missing_dir = Path(tempfile.mkdtemp(prefix="w8_pack_missing_"))
+        missing_out = missing_dir / "pack.md"
+        sys.argv = [
+            "build_evidence_pack.py",
+            "--out",
+            str(missing_out),
+            "--w3",
+            str(missing_dir),
+            "--w4",
+            str(run_b),
+        ]
+        try:
+            build_evidence_pack_main()
+            raise AssertionError("evidence pack builder should hard-fail on missing metric")
+        except SystemExit as exc:
+            assert "FAIL:" in str(exc)
         sys.argv = [
             "validate_capacity_sweep.py",
             str(run_a),
@@ -1512,6 +1565,10 @@ def test_w5_w8_tooling_fixtures():
             "--w5",
             str(run_a),
             str(run_b),
+            "--w6",
+            str(run_b),
+            "--w7",
+            str(run_w7),
         ]
         build_evidence_pack_main()
         assert out_path.is_file()
@@ -1519,6 +1576,35 @@ def test_w5_w8_tooling_fixtures():
     finally:
         sys.argv = old_argv
     print("  capacity sweep validator + evidence pack builder -> ok")
+
+
+def test_latent_trace_policy_violation():
+    print("\n== 10i5. W3/W4 trace policy hard fail fixture ==")
+    cfg = {"trace_v2": {"required": True, "forbid_fallback": True}}
+    try:
+        _assert_trace_ok({"trace_quality": "approx_from_generated_token_ids"}, cfg, "bad")
+        raise AssertionError("trace_v2.required should reject fallback trace quality")
+    except TracePolicyViolation as exc:
+        assert "instrumented_sparse_v0" in str(exc)
+    try:
+        _assert_trace_ok(
+            {
+                "trace_quality": "instrumented_sparse_v0",
+                "trace_v2_error": "legacy fallback",
+                "missing_modules": [],
+            },
+            cfg,
+            "bad",
+        )
+        raise AssertionError("trace_v2.forbid_fallback should reject trace_v2_error")
+    except TracePolicyViolation as exc:
+        assert "forbidden" in str(exc)
+    _assert_trace_ok(
+        {"trace_quality": "instrumented_sparse_v0", "missing_modules": [], "trace_v2_error": None},
+        cfg,
+        "ok",
+    )
+    print("  latent metric rejects trace fallback under required policy -> ok")
 
 
 def test_adapter_probe_catalog():
@@ -1643,6 +1729,7 @@ def main():
     test_w3_latent_sanity_and_validator_fixtures()
     test_w4_latent_step_sweep_fixtures()
     test_w5_w8_tooling_fixtures()
+    test_latent_trace_policy_violation()
     test_adapter_probe_catalog()
     test_bf1_does_not_cache_gpu_inputs_static()
     test_end_to_end()

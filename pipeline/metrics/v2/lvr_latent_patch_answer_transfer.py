@@ -15,6 +15,10 @@ LEGACY_NAME = "lvr_latent_patch"
 CANDIDATES = ("original", "modified")
 
 
+class TracePolicyViolation(RuntimeError):
+    pass
+
+
 def build_schema() -> dict:
     return {
         "metric_id": METRIC_ID,
@@ -43,6 +47,28 @@ def build_schema() -> dict:
 
 def _cfg(cfg: dict) -> dict:
     return cfg.get("lvr_latent_patch", {}) or {}
+
+
+def _trace_policy(cfg: dict) -> tuple[bool, bool]:
+    trace_cfg = cfg.get("trace_v2", {}) or {}
+    required = bool(trace_cfg.get("required", False))
+    forbid_fallback = bool(trace_cfg.get("forbid_fallback", required))
+    return required, forbid_fallback
+
+
+def _assert_trace_ok(trace: dict, cfg: dict, label: str) -> None:
+    required, forbid_fallback = _trace_policy(cfg)
+    if not required:
+        return
+    quality = trace.get("trace_quality")
+    if quality != "instrumented_sparse_v0":
+        raise TracePolicyViolation(
+            f"{label} trace_quality must be instrumented_sparse_v0 under trace_v2.required; got {quality!r}"
+        )
+    if forbid_fallback and trace.get("trace_v2_error"):
+        raise TracePolicyViolation(f"{label} trace fallback/error forbidden: {trace.get('trace_v2_error')!r}")
+    if forbid_fallback and trace.get("missing_modules"):
+        raise TracePolicyViolation(f"{label} trace missing modules forbidden: {trace.get('missing_modules')!r}")
 
 
 def _source_sample(sample):
@@ -134,6 +160,7 @@ def _trace_kwargs(local: dict, audit_cfg: dict, *, patch_states=None, patch_step
             "max_captured_tensors": int(local.get("max_captured_tensors", max(4, lvr_steps + 2))),
             "patch_states": patch_states,
             "patch_steps": patch_steps,
+            "patch_shape_policy": str(local.get("patch_shape_policy", "strict")),
         },
     }
 
@@ -253,6 +280,7 @@ def run_one_pair(wrapper, sample, cfg: dict) -> dict:
         source.question,
         **_trace_kwargs(local, audit_cfg),
     )
+    _assert_trace_ok(source_trace, cfg, "source")
 
     clean_trace = wrapper.adapter.generate_with_trace(
         wrapper,
@@ -260,6 +288,7 @@ def run_one_pair(wrapper, sample, cfg: dict) -> dict:
         target.question,
         **_trace_kwargs(local, audit_cfg),
     )
+    _assert_trace_ok(clean_trace, cfg, "clean")
 
     source_answer = parse_candidate(source.answer)
     target_answer = parse_candidate(target.answer)
@@ -284,6 +313,7 @@ def run_one_pair(wrapper, sample, cfg: dict) -> dict:
                     patch_steps=[step_index],
                 ),
             )
+            _assert_trace_ok(patched_trace, cfg, f"patched_step_{step_index}")
             step_results.append(_patch_result(
                 patched_trace=patched_trace,
                 clean_trace=clean_trace,
@@ -316,6 +346,7 @@ def run_one_pair(wrapper, sample, cfg: dict) -> dict:
                 patch_steps=selected_step_ids or None,
             ),
         )
+        _assert_trace_ok(patched_trace, cfg, "patched")
         patched_summary = _patch_result(
             patched_trace=patched_trace,
             clean_trace=clean_trace,
@@ -469,6 +500,8 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
     for sample in paired:
         try:
             records.append(run_one_pair(wrapper, sample, cfg))
+        except TracePolicyViolation:
+            raise
         except Exception as exc:  # noqa: BLE001
             records.append({
                 "id": sample.id,
@@ -487,6 +520,7 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
             "patch_tensor": "output_last_position_hidden_state",
             "intervention_site": "forward_pre.last_position_hidden_state",
             "answer_candidates": list(CANDIDATES),
+            "patch_shape_policy": str(local.get("patch_shape_policy", "strict")),
         },
         "samples": records,
         "reduction": reduce_records(records, len(paired)),

@@ -92,11 +92,20 @@ bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
 W8 evidence pack:
 
 ```bash
-./venv/bin/python tools/build_evidence_pack.py \
-  --w5 runs/w5_lvr_capacity_s2_n50 runs/w5_lvr_capacity_s4_n50 \
-       runs/w5_lvr_capacity_s8_n50 runs/w5_lvr_capacity_s16_n50 \
-  --w6 runs/w6_lvr_beststep4_s8_n50 \
-  --w7 runs/w7_spd_scale_m0_m1_m2_n200
+./venv/bin/python tools/build_evidence_pack.py
+```
+
+Environment and capacity comparison helpers:
+
+```bash
+./venv/bin/python tools/check_lvr_env.py \
+  --config config.lvr_latent_patch.stepsweep.yaml
+
+./venv/bin/python tools/compare_capacity_sweep.py \
+  runs/w5_lvr_capacity_s2_n50 \
+  runs/w5_lvr_capacity_s4_n50 \
+  runs/w5_lvr_capacity_s8_n50 \
+  runs/w5_lvr_capacity_s16_n50
 ```
 
 ## Results
@@ -117,6 +126,15 @@ Capacity sweep validator:
 ```text
 CAPACITY SWEEP VALIDATION PASSED
 ```
+
+Capacity comparison artifacts:
+
+```text
+docs/capacity_sweep/capacity_summary.json
+docs/capacity_sweep/capacity_summary.md
+```
+
+These report adjacent paired-bootstrap differences across capacity budgets. They are descriptive and do not hard-fail on monotonicity.
 
 ### W6 Best-Step Replication
 
@@ -174,4 +192,12 @@ SPD RANGE VALIDATION PASSED
 
 Generated: `docs/evidence_pack_w5_w8.md`
 
+Builder status:
+
+```text
+EVIDENCE PACK VALIDATION PASSED
+```
+
 The evidence pack summarizes W3-W7 gates and restates the scope boundary: W3-W6 are true inference-time LVR hidden-feedback interventions on constrained SPD-Faith answers; W7 is query-span regression evidence across Qwen/LVR weights.
+
+The builder now hard-fails by default on missing latent metric JSON, missing reductions, non-pass sanity summaries, invalid W5 capacity artifacts, or missing/empty W7 CI rows. `--allow-missing` is reserved for local drafting only.

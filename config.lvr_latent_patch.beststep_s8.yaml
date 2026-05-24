@@ -57,6 +57,7 @@ trace_v2:
 lvr_latent_patch:
   max_pairs: 50
   patch_steps: ["4"]
+  patch_shape_policy: "strict"
   patch_tensor: "output_last_position_hidden_state"
   intervention_site: "forward_pre.last_position_hidden_state"
   decoding_strategy: "steps"
