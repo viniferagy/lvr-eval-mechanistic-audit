@@ -49,6 +49,7 @@ _ALIASES.update({
     "pf_b": "pf_b_patch_alignment",
     "lvr_latent_patch": "lvr_latent_patch_answer_transfer",
     "latent_patch": "lvr_latent_patch_answer_transfer",
+    "monet_latent_patch": "monet_latent_patch_answer_transfer",
 })
 
 

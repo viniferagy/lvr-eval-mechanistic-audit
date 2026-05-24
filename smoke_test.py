@@ -51,6 +51,10 @@ from pipeline.metrics.v2.lvr_latent_patch_answer_transfer import (
     parse_candidate,
     reduce_records as reduce_w3_latent_records,
 )
+from pipeline.metrics.v2.monet_latent_patch_answer_transfer import (
+    METRIC_ID as MONET_LATENT_METRIC_ID,
+    reduce_records as reduce_monet_latent_records,
+)
 from pipeline.metrics.v2.pf_b_patch_alignment import run as run_pf_b_metric
 from pipeline.metrics.lvr_generation_trace import run as run_lvr_trace_metric
 from pipeline.preregistration import build_lock_payload, hash_manifest, load_manifest
@@ -73,6 +77,7 @@ from tools.build_findings_pack import main as build_findings_pack_main
 from tools.prepare_maze_planning_hf import main as prepare_maze_planning_hf_main
 from tools.prepare_monet_sft_hf import extract_prompt_answer, strip_latent_tokens
 from tools.validate_findings_gate import main as validate_findings_gate_main
+from tools.validate_monet_latent import main as validate_monet_latent_main
 from tools.validate_w3_latent import main as validate_w3_latent_main
 from tools.validate_w4_stepsweep import main as validate_w4_stepsweep_main
 from run_all import metric_enabled, selected_metric_ids
@@ -1890,9 +1895,9 @@ def test_adapter_probe_catalog():
     assert set(summary["model_ids"]) == {"monet", "latent_sketchpad", "crystal"}
     assert summary["main_pool_ready"] == []
     monet = next(row for row in probes if row["model_id"] == "monet")
-    assert monet["main_pool_status"] == "candidate_w12_preflight"
+    assert monet["main_pool_status"] == "candidate_w13_transformers_latent_gate"
     assert "NOVAglow646/Monet-7B" in monet["public_weights"]
-    assert "vLLM" in monet["hookability"]
+    assert "ce_patch_vec" in monet["hookability"]
     print("  Monet / Latent Sketchpad / CrystaL go-no-go metadata -> ok")
 
 
@@ -1921,6 +1926,112 @@ def test_monet_preflight_wiring():
     assert cfg["models"]["monet_7b"]["arch"] == "monet_qwen2_5_vl"
     assert cfg["models"]["monet_7b"]["latent_start_id"] == 151666
     print("  Monet adapter registry, data parser, and config boundary -> ok")
+
+
+def _monet_latent_payload(n=3, *, n_success=None, include_ci=True):
+    n_success = n if n_success is None else n_success
+    samples = []
+    for idx in range(n):
+        if idx >= n_success:
+            samples.append({"id": f"s{idx}", "paired_id": f"p{idx}", "error": "RuntimeError('boom')"})
+            continue
+        samples.append({
+            "id": f"s{idx}",
+            "paired_id": f"p{idx}",
+            "source_answer": "modified",
+            "target_answer": "original",
+            "clean_answer": "original",
+            "patched_answer": "modified",
+            "answer_transferred": True,
+            "latent_margin_shift": 1.0,
+            "trace_quality": "monet_transformers_latent_mode_v0",
+            "source_trace_quality": "monet_transformers_latent_mode_v0",
+            "target_trace_quality": "monet_transformers_latent_mode_v0",
+            "latent_mode_path": "transformers_ce_patch_vec",
+            "vllm_scheduler_native": False,
+            "n_captured_latent_states": 10,
+            "n_patch_applied": 10,
+            "captured_state_shapes": [[10, 3584]],
+            "target_captured_state_shapes": [[10, 3584]],
+            "patch_state_shapes": [[10, 3584]],
+            "reduction": {
+                "latent_answer_transfer_rate": 1.0,
+                "latent_margin_shift": 1.0,
+            },
+        })
+    payload = {
+        "model": "monet_7b",
+        "config": {
+            "latent_mode_path": "transformers_ce_patch_vec",
+            "vllm_scheduler_native": False,
+        },
+        "samples": samples,
+        "reduction": reduce_monet_latent_records(samples, n),
+        "n_paired": n,
+    }
+    ci = []
+    if include_ci:
+        ci = [{
+            "metric_id": MONET_LATENT_METRIC_ID,
+            "model": "monet_7b",
+            "scalar": "latent_answer_transfer_rate",
+            "n": n_success,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+        }]
+    return payload, ci
+
+
+def test_monet_latent_gate_wiring():
+    print("\n== 10l. Monet W13 latent gate wiring ==")
+    spec = get_metric("monet_latent_patch")
+    assert spec.metric_id == MONET_LATENT_METRIC_ID
+    payload, _ci = _monet_latent_payload(n=3)
+    cfg = {"validation": {"monet": {"min_pairs": 3, "max_error_ratio": 0.2}}}
+    reports = run_sanity_for_metric_result(MONET_LATENT_METRIC_ID, payload, cfg)
+    assert not has_failed_checks(reports)
+    bad, _ = _monet_latent_payload(n=3, n_success=1)
+    assert has_failed_checks(run_sanity_for_metric_result(MONET_LATENT_METRIC_ID, bad, cfg))
+    config = yaml.safe_load(Path("config.monet_latent_patch.range.yaml").read_text(encoding="utf-8"))
+    assert config["metrics"][MONET_LATENT_METRIC_ID]["enabled"] is True
+    assert config["monet_latent_patch"]["latent_size"] == 10
+    print("  Monet latent metric registry, config, and sanity fixtures -> ok")
+
+
+def test_validate_monet_latent_fixture():
+    print("\n== 10m. Monet W13 validator fixtures ==")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        run = root / "run"
+        (run / "metrics").mkdir(parents=True)
+        (run / "sanity").mkdir()
+        payload, ci = _monet_latent_payload(n=3)
+        (run / "metrics" / f"{MONET_LATENT_METRIC_ID}_monet_7b.json").write_text(json.dumps({
+            "metric_id": MONET_LATENT_METRIC_ID,
+            "model": "monet_7b",
+            "payload": payload,
+        }), encoding="utf-8")
+        (run / "sanity" / "summary_sanity.json").write_text(json.dumps({"overall_status": "pass"}), encoding="utf-8")
+        (run / "summary_with_ci.json").write_text(json.dumps(ci), encoding="utf-8")
+        (run / "prereg.lock.json").write_text(json.dumps({
+            "sha256": "fake",
+            "manifest": {
+                "experimental_metrics": [
+                    {"metric_id": MONET_LATENT_METRIC_ID, "primary_scalar": "latent_answer_transfer_rate"}
+                ],
+            },
+        }), encoding="utf-8")
+        validate_monet_latent_main([str(run), "--min-pairs", "3"])
+
+        missing = root / "missing"
+        (missing / "metrics").mkdir(parents=True)
+        try:
+            validate_monet_latent_main([str(missing), "--min-pairs", "3"])
+            raise AssertionError("Monet validator should reject missing artifacts")
+        except SystemExit as exc:
+            assert "FAIL" in str(exc)
+    print("  Monet latent validator accepts/rejects fixtures -> ok")
 
 
 def test_bf1_does_not_cache_gpu_inputs_static():
@@ -2040,6 +2151,8 @@ def main():
     test_latent_trace_policy_violation()
     test_adapter_probe_catalog()
     test_monet_preflight_wiring()
+    test_monet_latent_gate_wiring()
+    test_validate_monet_latent_fixture()
     test_bf1_does_not_cache_gpu_inputs_static()
     test_end_to_end()
     print("\nSMOKE TEST PASSED ✅")

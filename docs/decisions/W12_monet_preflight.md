@@ -11,7 +11,7 @@ The next Main-track step is to add a second real latent paradigm. Monet is the p
 - a customized Qwen2.5-VL Transformers model for standard forward probes;
 - a customized vLLM runner where `<abs_vis_token>` switches decoding into latent visual mode.
 
-This moves Monet from Week-2 no-go into a W12 preflight candidate, but not yet into the paper evidence matrix.
+This moved Monet from Week-2 no-go into a W12 preflight candidate, but not yet into the paper evidence matrix. W13 has since added a separate Monet Transformers latent-mode causal range gate; see [W13_monet_latent_gate.md](/home/pengguangyue/workspace/proj/lvr-eval-mechanistic-audit/docs/decisions/W13_monet_latent_gate.md).
 
 ## Local Result
 
@@ -93,4 +93,4 @@ Monet can move from preflight into the Main model pool only after:
 - a dedicated Monet vLLM trace adapter captures at least one true latent-mode tensor during generation;
 - the trace adapter fails hard on fallback, missing runner patching, or missing latent states.
 
-Until then, Monet is a real public candidate and data source, not a completed second-paradigm causal result.
+W12 alone remains a preflight. W13 is the first completed second-paradigm causal range gate in this repo, while the modified-vLLM scheduler-native Monet trace adapter remains open.

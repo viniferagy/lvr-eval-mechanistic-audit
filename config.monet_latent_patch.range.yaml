@@ -1,0 +1,63 @@
+models:
+  monet_7b:
+    name: "Monet-7B"
+    path: "./models/Monet-7B"
+    arch: "monet_qwen2_5_vl"
+    monet_source_path: "../Monet"
+    layer_path: null
+    image_pad_token: "<|image_pad|>"
+    latent_pad_token: "<abs_vis_token_pad>"
+    latent_pad_id: 151665
+    latent_start_token: "<abs_vis_token>"
+    latent_start_id: 151666
+    latent_end_token: "</abs_vis_token>"
+    latent_end_id: 151667
+
+runtime:
+  lvr_wait_timeout_minutes: 120
+
+audit:
+  mode: "monet_transformers_latent_patch"
+  max_image_side: 384
+  max_image_pixels: 147456
+
+model_aliases:
+  M3: monet_7b
+
+data:
+  source_type: "spd_faith"
+  jsonl_path: "./data/spd_faith_hf/manifest.jsonl"
+  image_root: "./data/spd_faith_hf/images"
+  require_region_or_bbox: true
+  skip_missing_images: false
+  max_samples: 50
+  shuffle_seed: 260625
+
+preregistration:
+  enabled: true
+  manifest_path: "prereg/manifest.yaml"
+
+inference:
+  dtype: "bfloat16"
+  device: "cuda:0"
+
+metrics:
+  monet_latent_patch_answer_transfer:
+    enabled: true
+
+monet_latent_patch:
+  max_pairs: 50
+  latent_size: 10
+  patch_steps: ["all"]
+  patch_shape_policy: "strict"
+
+validation:
+  run_sanity: true
+  fail_fast: true
+  monet:
+    min_pairs: 50
+    max_error_ratio: 0.2
+
+output:
+  root: "./runs"
+  run_name: null

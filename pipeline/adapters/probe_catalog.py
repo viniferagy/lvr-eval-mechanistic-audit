@@ -20,16 +20,17 @@ PROBES: tuple[AdapterProbe, ...] = (
         model_id="monet",
         display_name="Monet",
         public_weights="verified_public_hf:NOVAglow646/Monet-7B",
-        hookability="candidate_transformers_standard_forward; latent inference requires modified vLLM runner",
-        main_pool_status="candidate_w12_preflight",
+        hookability="transformers_latent_mode_ce_patch_vec_ready; scheduler-native latent inference requires modified vLLM runner",
+        main_pool_status="candidate_w13_transformers_latent_gate",
         rationale=(
             "Official Monet exposes public 7B weights, public SFT data, and a customized "
-            "Qwen2.5-VL/vLLM latent inference path. It is the preferred second real "
-            "latent paradigm once local checkpoint/source probes pass."
+            "Qwen2.5-VL/vLLM latent inference path. The local W13 range gate now audits "
+            "the official Transformers latent-mode ce_patch_vec path; the modified-vLLM "
+            "scheduler-native path remains the next evidence upgrade."
         ),
         next_action=(
-            "Download Monet-7B and clone NOVAglow646/Monet, run tools/check_monet_env.py, "
-            "then run a no-forward adapter probe before implementing the vLLM latent trace adapter."
+            "Scale the W13 Transformers latent gate and implement a vLLM scheduler-native "
+            "trace adapter around inference/vllm/monet_gpu_model_runner.py."
         ),
     ),
     AdapterProbe(

@@ -50,6 +50,13 @@ experimental_metrics:
     version: "0.4-w4-step-localization"
     status: "runnable_w4_stepsweep"
     scope: "true_lvr_generation_time_hidden_feedback_step_localization"
+  - metric_id: "monet_latent_patch_answer_transfer"
+    family: "BF"
+    primary_scalar: "latent_answer_transfer_rate"
+    version: "0.13-w13-monet-transformers-latent-gate"
+    status: "runnable_w13_range_gate"
+    scope: "Monet official Transformers latent-mode ce_patch_vec hidden-state intervention on SPD-Faith"
+    boundary: "not modified-vLLM scheduler-native generation"
 statistics:
   bootstrap:
     ci: 0.95
@@ -134,3 +141,19 @@ gates:
       - "bf_conf_calibrated_progression"
     status: "completed_preflight_not_causal_result"
     boundary: "standard-forward architecture/data preflight only; true Monet latent causal evidence requires modified-vLLM trace adapter"
+  - gate_id: "W13_monet_transformers_latent_range"
+    model: "monet_7b"
+    public_model: "NOVAglow646/Monet-7B"
+    public_data: "Jackson-Lv/SPD-Faith-Bench"
+    metric_id: "monet_latent_patch_answer_transfer"
+    primary_scalar: "latent_answer_transfer_rate"
+    adapter_arch: "monet_qwen2_5_vl"
+    config: "config.monet_latent_patch.range.yaml"
+    artifact: "docs/validation_report_w13_monet.md"
+    run_dir: "runs/w13_monet_latent_patch_n50"
+    source_commit: "08939998d3d643a73a316e349faa34f420429153"
+    sample_budget: 50
+    latent_size: 10
+    patch_steps: ["all"]
+    status: "completed_range_gate"
+    boundary: "causal hidden-state patching through Monet Transformers latent_mode; vLLM scheduler-native trace remains future work"
