@@ -16,6 +16,7 @@ DEFAULT_MAZE_FIELD_MAP = {
     "question": ["question", "query", "prompt", "instruction"],
     "answer": ["answer", "path", "solution", "target"],
     "rationale": ["rationale", "trace", "reasoning_trace"],
+    "bboxes": ["bboxes", "bbox", "region_bboxes"],
 }
 
 
@@ -85,6 +86,7 @@ def load_maze(cfg: dict) -> list[ProbeSample]:
             answer=_value(record, cfg, "answer"),
             raw=record,
             image_path=str(image_value),
+            bboxes=_value(record, cfg, "bboxes"),
             rationale=_value(record, cfg, "rationale"),
             paired_id=str(record.get("paired_id", sample_id)),
             source_dataset=record.get("dataset", "maze"),

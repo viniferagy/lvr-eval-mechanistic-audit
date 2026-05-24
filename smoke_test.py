@@ -68,6 +68,9 @@ from pipeline.sanity import (
 from tools.validate_spd_range import main as validate_spd_range_main
 from tools.validate_capacity_sweep import main as validate_capacity_sweep_main
 from tools.build_evidence_pack import main as build_evidence_pack_main
+from tools.build_findings_pack import main as build_findings_pack_main
+from tools.prepare_maze_planning_hf import main as prepare_maze_planning_hf_main
+from tools.validate_findings_gate import main as validate_findings_gate_main
 from tools.validate_w3_latent import main as validate_w3_latent_main
 from tools.validate_w4_stepsweep import main as validate_w4_stepsweep_main
 from run_all import metric_enabled, selected_metric_ids
@@ -301,6 +304,53 @@ def test_spd_faith_and_maze_loaders():
     with open(os.path.join(out_dir, "data_loader_smoke_summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     print("  spd_faith + maze fixtures -> ok")
+
+
+def test_prepare_maze_planning_fixture():
+    print("\n== 4c. MazePlanning prepare fixture ==")
+    out_dir = Path(tempfile.mkdtemp(prefix="maze_prepare_fixture_"))
+    src_root = out_dir / "source"
+    image_root = src_root / "imgs"
+    image_root.mkdir(parents=True)
+    make_img(seed=13).save(image_root / "maze_000.png")
+    raw_path = src_root / "updated_data.json"
+    raw_path.write_text(json.dumps([
+        {
+            "input_text": "USER: Given the maze in the input image <image>, find a path.",
+            "input_img": ["imgs/maze_000.png"],
+            "label_actions": ["go forward", "turn left", "go forward"],
+        }
+    ]), encoding="utf-8")
+    prepared = out_dir / "prepared"
+    import sys
+
+    old_argv = sys.argv
+    try:
+        sys.argv = [
+            "prepare_maze_planning_hf.py",
+            "--input-json", str(raw_path),
+            "--image-root", str(src_root),
+            "--out", str(prepared),
+            "--strict-actions",
+        ]
+        prepare_maze_planning_hf_main()
+    finally:
+        sys.argv = old_argv
+    manifest = prepared / "manifest.jsonl"
+    stats = json.loads((prepared / "prepare_stats.json").read_text(encoding="utf-8"))
+    assert stats["n_written"] == 1
+    rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert rows[0]["answer"] == "go forward, turn left, go forward"
+    maze = load_probe_set({
+        "source_type": "maze",
+        "jsonl_path": str(manifest),
+        "image_root": str(prepared / "images"),
+        "skip_missing_images": False,
+    })
+    assert len(maze) == 1
+    assert maze[0].task_metadata["steps"] == ["go forward", "turn left", "go forward"]
+    assert maze[0].bboxes and len(maze[0].bboxes[0]) == 4
+    print("  MazePlanning HF/local converter fixture -> ok")
 
 
 def test_image_resize_metadata():
@@ -1651,6 +1701,138 @@ def test_w5_w8_tooling_fixtures():
     print("  capacity sweep validator + evidence pack builder -> ok")
 
 
+def test_findings_gate_tooling_fixtures():
+    print("\n== 10i6. Findings gate tooling fixtures ==")
+    w7_scalars = {
+        "pf_a_corruption_selectivity": "selectivity",
+        "pf_b_patch_alignment": "native_alignment",
+        "bf_patch_answer_transfer": "logprob_margin_shift",
+        "bf_swap_latent_replacement": "swap_margin_shift",
+        "bf_conf_calibrated_progression": "gold_logit_slope",
+        "cf_stage_decay": "late_delta",
+    }
+    maze_scalars = {
+        "pf_a_corruption_selectivity": "selectivity",
+        "pf_b_patch_alignment": "native_alignment",
+        "bf_conf_calibrated_progression": "gold_logit_slope",
+        "cf_stage_decay": "late_delta",
+    }
+    models = ("qwen2_5_vl_3b", "qwen2_5_vl_7b", "lvr_7b")
+
+    def write_latent(root: Path, *, step: bool = False):
+        (root / "metrics").mkdir(parents=True)
+        (root / "sanity").mkdir()
+        reduction = {
+            "latent_answer_transfer_rate": 0.5,
+            "latent_margin_shift": None,
+            "n_paired": 1,
+            "n_success": 1,
+            "n_error": 0,
+            "n_patch_applied": 1,
+            "n_with_lvr_mode": 1,
+            "n_with_captured_state": 1,
+        }
+        if step:
+            reduction.update({
+                "best_step_transfer_rate": 0.5,
+                "step_transfer_auc": 0.5,
+                "last_step_transfer_rate": 0.5,
+                "n_steps_evaluated": 2,
+                "per_step": [{"step_index": 0}, {"step_index": 1}],
+            })
+        (root / "metrics" / "lvr_latent_patch_answer_transfer_lvr_7b.json").write_text(json.dumps({
+            "metric_id": "lvr_latent_patch_answer_transfer",
+            "model": "lvr_7b",
+            "payload": {"model": "lvr_7b", "n_paired": 1, "reduction": reduction},
+        }))
+        scalars = ["latent_answer_transfer_rate"]
+        if step:
+            scalars.append("best_step_transfer_rate")
+        (root / "summary_with_ci.json").write_text(json.dumps([
+            {"metric_id": "lvr_latent_patch_answer_transfer", "model": "lvr_7b", "scalar": scalar, "n": 1}
+            for scalar in scalars
+        ]))
+        (root / "sanity" / "summary_sanity.json").write_text(json.dumps({"overall_status": "pass"}))
+        (root / "prereg.lock.json").write_text(json.dumps({"sha256": "fixture"}))
+
+    def write_matrix(root: Path, scalars: dict[str, str]):
+        (root / "metrics").mkdir(parents=True)
+        (root / "sanity").mkdir()
+        rows = []
+        for metric_id, scalar in scalars.items():
+            for model in models:
+                payload = {
+                    "model": model,
+                    "reduction": {scalar: 0.2, "n": 1},
+                    "samples": [{"id": "s0", "reduction": {scalar: 0.2}}],
+                }
+                if metric_id in {"bf_patch_answer_transfer", "bf_swap_latent_replacement"}:
+                    payload["n_paired"] = 1
+                    payload["reduction"]["n_paired"] = 1
+                (root / "metrics" / f"{metric_id}_{model}.json").write_text(json.dumps({
+                    "metric_id": metric_id,
+                    "model": model,
+                    "payload": payload,
+                }))
+                rows.append({"metric_id": metric_id, "model": model, "scalar": scalar, "n": 1})
+        (root / "summary_with_ci.json").write_text(json.dumps(rows))
+        (root / "sanity" / "summary_sanity.json").write_text(json.dumps({"overall_status": "pass"}))
+        (root / "prereg.lock.json").write_text(json.dumps({"sha256": "fixture"}))
+
+    w3 = Path(tempfile.mkdtemp(prefix="findings_w3_"))
+    w4 = Path(tempfile.mkdtemp(prefix="findings_w4_"))
+    w6 = Path(tempfile.mkdtemp(prefix="findings_w6_"))
+    spd = Path(tempfile.mkdtemp(prefix="findings_spd_"))
+    maze = Path(tempfile.mkdtemp(prefix="findings_maze_"))
+    write_latent(w3)
+    write_latent(w4, step=True)
+    write_latent(w6)
+    write_matrix(spd, w7_scalars)
+    write_matrix(maze, maze_scalars)
+
+    import sys
+
+    old_argv = sys.argv
+    try:
+        common = [
+            "--w3", str(w3),
+            "--w4", str(w4),
+            "--w6", str(w6),
+            "--spd", str(spd),
+            "--maze", str(maze),
+            "--min-latent-pairs", "1",
+            "--min-spd-samples", "1",
+            "--min-maze-samples", "1",
+            "--min-steps", "2",
+        ]
+        sys.argv = ["validate_findings_gate.py", *common]
+        validate_findings_gate_main()
+        out_path = Path(tempfile.mkdtemp(prefix="findings_pack_")) / "pack.md"
+        sys.argv = ["build_findings_pack.py", "--out", str(out_path), *common]
+        build_findings_pack_main()
+        assert out_path.is_file()
+        assert "Findings Evidence Pack" in out_path.read_text(encoding="utf-8")
+        sys.argv = [
+            "validate_findings_gate.py",
+            "--w3", str(w3),
+            "--w4", str(w4),
+            "--w6", str(w6),
+            "--spd", str(spd),
+            "--maze", str(maze / "missing"),
+            "--min-latent-pairs", "1",
+            "--min-spd-samples", "1",
+            "--min-maze-samples", "1",
+        ]
+        try:
+            validate_findings_gate_main()
+            raise AssertionError("Findings validator should reject missing Maze by default")
+        except SystemExit as exc:
+            assert "FAIL:" in str(exc)
+    finally:
+        sys.argv = old_argv
+    print("  Findings validator and pack accept/reject fixtures -> ok")
+
+
 def test_latent_trace_policy_violation():
     print("\n== 10i5. W3/W4 trace policy hard fail fixture ==")
     cfg = {"trace_v2": {"required": True, "forbid_fallback": True}}
@@ -1801,6 +1983,7 @@ def main():
     test_reductions()
     test_data_field_mapping()
     test_spd_faith_and_maze_loaders()
+    test_prepare_maze_planning_fixture()
     test_image_resize_metadata()
     test_pf3_corrupt_after_resize()
     test_lvr_json_loader()
@@ -1820,6 +2003,7 @@ def main():
     test_w3_latent_sanity_and_validator_fixtures()
     test_w4_latent_step_sweep_fixtures()
     test_w5_w8_tooling_fixtures()
+    test_findings_gate_tooling_fixtures()
     test_latent_trace_policy_violation()
     test_adapter_probe_catalog()
     test_bf1_does_not_cache_gpu_inputs_static()

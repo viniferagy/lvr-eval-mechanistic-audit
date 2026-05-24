@@ -1,6 +1,6 @@
-manifest_version: "0.8-w8-evidence-package"
+manifest_version: "0.9-findings-gate"
 project: "LatentFaith-Audit"
-created_for: "w8_evidence_package"
+created_for: "findings_gate"
 analysis_blind_seed: 260523
 stopping_rule:
   description: "Run the preregistered sample budget per model/task unless failures are attributable to missing local data or model weights."
@@ -57,7 +57,7 @@ statistics:
     paired: true
   mixed_effects:
     formula: "metric_value ~ model + task + (1|sample_id)"
-    status: "planned_not_required_for_w8_gate"
+    status: "planned_not_required_for_findings_gate"
 gates:
   - gate_id: "W5_capacity_sweep"
     metric_id: "lvr_latent_patch_answer_transfer"
@@ -90,3 +90,32 @@ gates:
   - gate_id: "W8_evidence_pack"
     artifact: "docs/evidence_pack_w5_w8.md"
     status: "completed_packaging_gate"
+  - gate_id: "W9_findings_spd_scale"
+    metrics:
+      - "pf_a_corruption_selectivity"
+      - "pf_b_patch_alignment"
+      - "bf_patch_answer_transfer"
+      - "bf_swap_latent_replacement"
+      - "bf_conf_calibrated_progression"
+      - "cf_stage_decay"
+    sample_budget: 500
+    models:
+      - "qwen2_5_vl_3b"
+      - "qwen2_5_vl_7b"
+      - "lvr_7b"
+    status: "configured_pending_run"
+  - gate_id: "W9_findings_maze_subset"
+    metrics:
+      - "pf_a_corruption_selectivity"
+      - "pf_b_patch_alignment"
+      - "bf_conf_calibrated_progression"
+      - "cf_stage_decay"
+    sample_budget: 200
+    models:
+      - "qwen2_5_vl_3b"
+      - "qwen2_5_vl_7b"
+      - "lvr_7b"
+    status: "blocked_pending_real_maze_data"
+  - gate_id: "W9_findings_evidence_pack"
+    artifact: "docs/findings_evidence_pack.md"
+    status: "configured_pending_maze_artifact"

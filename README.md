@@ -8,12 +8,14 @@ This repository is currently at:
 
 ```text
 Engineering stage: W8 evidence package passed
-Scientific stage: true LVR hidden-feedback intervention + capacity/localization gates, not paper-grade causal evidence
+Scientific stage: Findings gate passed; true LVR hidden-feedback intervention, SPD scale evidence, and MazePlanning subset evidence are present
 ```
 
 The W2 gate demonstrates that the infrastructure can run end to end on real SPD-Faith paired data and real GPU models. The W3 gate adds true inference-time LVR hidden-feedback patching at `n=50`. W4 localizes which hidden-feedback steps drive that transfer at `n=50`, `lvr_steps=8`. W5 sweeps latent feedback budget, W6 replicates the best-step intervention, W7 scales SPD regression evidence to `n=200`, and W8 packages the evidence for review. These gates are stronger than the original proxy scaffold, but they are still not final paper-scale evidence.
 
 The SPD range runs treat `lvr_7b` as an LVR-weight model under query-span paired intervention, not as a true continuous latent-state intervention. The true latent-state evidence comes from the W3-W6 traced LVR runs.
+
+The Findings gate is explicit rather than implicit: `tools/validate_findings_gate.py` requires W3/W4/W6 true latent artifacts, W7 SPD artifacts, and a real Maze Findings run. The current local repository has all required artifacts, including `runs/w9_maze_findings_m0_m1_m2_n200_bbox`.
 
 ## Architecture
 
@@ -23,6 +25,8 @@ lvr-eval-mechanistic-audit/
 ├── config.trace_v2.yaml
 ├── config.spd_faith.range.yaml
 ├── config.spd_faith.week7_scale.yaml
+├── config.findings_spd_scale.yaml
+├── config.maze.findings.yaml
 ├── config.lvr_latent_patch.range.yaml
 ├── config.lvr_latent_patch.stepsweep.yaml
 ├── config.lvr_latent_patch.stepsweep_s2.yaml
@@ -36,13 +40,16 @@ lvr-eval-mechanistic-audit/
 ├── smoke_test.py
 ├── tools/
 │   ├── prepare_spd_faith_hf.py
+│   ├── prepare_maze_planning_hf.py
 │   ├── validate_spd_range.py
 │   ├── validate_capacity_sweep.py
 │   ├── validate_w3_latent.py
 │   ├── validate_w4_stepsweep.py
 │   ├── build_evidence_pack.py
+│   ├── build_findings_pack.py
 │   ├── check_lvr_env.py
 │   ├── compare_capacity_sweep.py
+│   ├── validate_findings_gate.py
 │   ├── run_and_hold.sh
 │   └── hold_gpu.py
 ├── docs/
@@ -51,7 +58,9 @@ lvr-eval-mechanistic-audit/
 │   ├── validation_report_w3.md
 │   ├── validation_report_w4.md
 │   ├── validation_report_w5_w8.md
-│   └── evidence_pack_w5_w8.md
+│   ├── findings_validation_report.md
+│   ├── evidence_pack_w5_w8.md
+│   └── findings_evidence_pack.md
 └── pipeline/
     ├── adapters/
     │   ├── base.py
@@ -180,6 +189,29 @@ This writes:
 data/spd_faith_hf/manifest.jsonl
 data/spd_faith_hf/prepare_stats.json
 data/spd_faith_hf/images/
+```
+
+Prepare the canonical local MazePlanning manifest from the public Latent Sketchpad test set:
+
+```bash
+./venv/bin/python tools/prepare_maze_planning_hf.py \
+  --out data/maze_planning
+```
+
+For a tiny conversion smoke:
+
+```bash
+./venv/bin/python tools/prepare_maze_planning_hf.py \
+  --max-samples 2 \
+  --out /tmp/maze_planning_prepare_smoke
+```
+
+This writes:
+
+```text
+data/maze_planning/manifest.jsonl
+data/maze_planning/prepare_stats.json
+data/maze_planning/images/
 ```
 
 ## Trace v2
@@ -383,9 +415,48 @@ Recorded W5-W8 results:
 | W7 SPD scale-up | 18/18 sanity pass, 66 CI rows, paired BF metrics `200/0` success/error per model |
 | W8 evidence pack | [docs/evidence_pack_w5_w8.md](/home/pengguangyue/workspace/proj/lvr-eval-mechanistic-audit/docs/evidence_pack_w5_w8.md) |
 
-`prereg/manifest.yaml` is synchronized to `manifest_version: 0.8-w8-evidence-package`; it preserves the six W2 primary metrics and records W5, W6, W7, and W8 as completed gates.
+`prereg/manifest.yaml` is synchronized to `manifest_version: 0.9-findings-gate`; it preserves the six W2 primary metrics, records W5-W8 as completed gates, and adds W9 Findings SPD/Maze/evidence-pack gates.
 
 See [docs/validation_report_w5_w8.md](/home/pengguangyue/workspace/proj/lvr-eval-mechanistic-audit/docs/validation_report_w5_w8.md) for exact commands, reductions, and validators.
+
+## Findings Gate
+
+Findings requires the existing true latent intervention artifacts plus a second task family. SPD-Faith is represented by W7, and MazePlanning is represented by the W9 bbox-oracle subset run.
+
+SPD n=500 scale-up config:
+
+```bash
+bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
+  --config config.findings_spd_scale.yaml \
+  --models qwen2_5_vl_3b qwen2_5_vl_7b lvr_7b \
+  --only pf_a_corruption_selectivity pf_b_patch_alignment \
+         bf_patch_answer_transfer bf_swap_latent_replacement \
+         bf_conf_calibrated_progression cf_stage_decay \
+  --device cuda:0 \
+  --run-name w9_spd_findings_m0_m1_m2_n500
+```
+
+Maze n=200 configured gate:
+
+```bash
+./venv/bin/python tools/prepare_maze_planning_hf.py \
+  --out data/maze_planning
+
+bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
+  --config config.maze.findings.yaml \
+  --models qwen2_5_vl_3b qwen2_5_vl_7b lvr_7b \
+  --only pf_a_corruption_selectivity pf_b_patch_alignment \
+         bf_conf_calibrated_progression cf_stage_decay \
+  --device cuda:0 \
+  --run-name w9_maze_findings_m0_m1_m2_n200_bbox
+```
+
+Findings validator and pack:
+
+```bash
+./venv/bin/python tools/validate_findings_gate.py
+./venv/bin/python tools/build_findings_pack.py
+```
 
 ## Analysis
 
@@ -396,6 +467,7 @@ Legacy artifacts without group keys keep the old one-sample bootstrap fallback.
 ## Known Boundaries
 
 - W2-W8 are reproducibility, localization, capacity, and scale-up gates, not a final causal-result package.
+- Findings-ready status is now enforced by `tools/validate_findings_gate.py`; it requires true latent W3/W4/W6 gates, W7 SPD, and W9 Maze.
 - W8 is an engineering/review evidence package, not a claim-finalizing result.
 - W5 capacity sweep passed validation, but it does not establish monotonic capacity scaling.
 - W6 best-step replication is an `n=50` gate-level replication, not a full replication study.
