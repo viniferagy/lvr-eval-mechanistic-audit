@@ -17,10 +17,14 @@ DEFAULT_REQUIRED_METRICS = {
 PRIMARY_SCALARS = {
     "pf_a_corruption_selectivity": "selectivity",
     "pf_b_patch_alignment": "native_alignment",
-    "bf_patch_answer_transfer": "logprob_margin_shift",
-    "bf_swap_latent_replacement": "swap_margin_shift",
+    "bf_patch_answer_transfer": "continuous_margin_shift",
+    "bf_swap_latent_replacement": "continuous_margin_shift",
     "bf_conf_calibrated_progression": "gold_logit_slope",
     "cf_stage_decay": "late_delta",
+}
+LEGACY_PRIMARY_SCALARS = {
+    "bf_patch_answer_transfer": "logprob_margin_shift",
+    "bf_swap_latent_replacement": "swap_margin_shift",
 }
 PATCH_METRICS = {"bf_patch_answer_transfer", "bf_swap_latent_replacement"}
 TRANSFER_SCALARS = {
@@ -28,6 +32,7 @@ TRANSFER_SCALARS = {
     "bf_swap_latent_replacement": "swap_answer_transfer_rate",
 }
 CONTINUOUS_MARGIN_SOURCES = {"generation_scores", "generation_scores_aligned_first_token", "latent_logit_lens"}
+ACCEPTED_TRACE_QUALITIES = {"instrumented_sparse_v0", "monet_vllm_latent_v0"}
 
 
 def fail(msg: str) -> None:
@@ -51,13 +56,13 @@ def _valid_trace_records(payload: dict) -> int:
     for record in payload.get("samples") or []:
         if record.get("error") is not None:
             continue
-        if record.get("trace_quality") == "instrumented_sparse_v0" or record.get("source_trace_quality") == "instrumented_sparse_v0":
+        if record.get("trace_quality") in ACCEPTED_TRACE_QUALITIES or record.get("source_trace_quality") in ACCEPTED_TRACE_QUALITIES:
             count += 1
     for cell in payload.get("cells") or []:
         for record in cell.get("records") or []:
             if record.get("error") is not None:
                 continue
-            if record.get("trace_quality") == "instrumented_sparse_v0" or record.get("source_trace_quality") == "instrumented_sparse_v0":
+            if record.get("trace_quality") in ACCEPTED_TRACE_QUALITIES or record.get("source_trace_quality") in ACCEPTED_TRACE_QUALITIES:
                 count += 1
     return count
 
@@ -187,7 +192,9 @@ def main(argv: list[str] | None = None) -> None:
         if config.get("trace_latent") is not True:
             fail(f"{metric_id} did not run in trace_latent mode")
         if reduction.get(scalar) is None:
-            fail(f"{metric_id} missing primary scalar {scalar}")
+            legacy_scalar = LEGACY_PRIMARY_SCALARS.get(metric_id)
+            if not (args.compat_allow_legacy_margin and legacy_scalar and reduction.get(legacy_scalar) is not None):
+                fail(f"{metric_id} missing primary scalar {scalar}")
         trace_records = _valid_trace_records(payload)
         threshold = args.min_pairs if metric_id in PATCH_METRICS else args.min_samples
         if trace_records < threshold:
@@ -230,7 +237,13 @@ def main(argv: list[str] | None = None) -> None:
     for metric_id, scalar in PRIMARY_SCALARS.items():
         if metric_id not in required_metrics:
             continue
-        if (metric_id, "lvr_7b", scalar) not in primary_ci:
+        legacy_scalar = LEGACY_PRIMARY_SCALARS.get(metric_id)
+        legacy_ok = (
+            args.compat_allow_legacy_margin
+            and legacy_scalar is not None
+            and (metric_id, "lvr_7b", legacy_scalar) in primary_ci
+        )
+        if (metric_id, "lvr_7b", scalar) not in primary_ci and not legacy_ok:
             fail(f"summary_with_ci missing primary row: {metric_id}/lvr_7b/{scalar}")
     if not args.compat_allow_legacy_margin:
         for metric_id, scalar in TRANSFER_SCALARS.items():

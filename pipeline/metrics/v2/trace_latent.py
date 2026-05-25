@@ -20,7 +20,10 @@ except ImportError:  # pragma: no cover - smoke envs may not import torch.
 
 
 CANDIDATES = ("original", "modified")
-TRACE_QUALITY = "instrumented_sparse_v0"
+LVR_TRACE_QUALITY = "instrumented_sparse_v0"
+MONET_VLLM_TRACE_QUALITY = "monet_vllm_latent_v0"
+ACCEPTED_TRACE_QUALITIES = {LVR_TRACE_QUALITY, MONET_VLLM_TRACE_QUALITY}
+TRACE_QUALITY = LVR_TRACE_QUALITY
 GENERATION_SCORE_MARGIN_SOURCE = "generation_scores_aligned_first_token"
 CONTINUOUS_MARGIN_SOURCES = {"generation_scores", GENERATION_SCORE_MARGIN_SOURCE, "latent_logit_lens"}
 
@@ -61,9 +64,10 @@ def assert_trace_ok(trace: dict, cfg_root: dict, label: str) -> None:
     if not required(cfg_root):
         return
     quality = trace.get("trace_quality")
-    if quality != TRACE_QUALITY:
+    if quality not in ACCEPTED_TRACE_QUALITIES:
         raise TraceLatentPolicyViolation(
-            f"{label} trace_quality must be {TRACE_QUALITY} under trace_latent.required; got {quality!r}"
+            f"{label} trace_quality must be one of {sorted(ACCEPTED_TRACE_QUALITIES)} "
+            f"under trace_latent.required; got {quality!r}"
         )
     if forbid_fallback(cfg_root) and trace.get("trace_v2_error"):
         raise TraceLatentPolicyViolation(f"{label} trace fallback/error forbidden: {trace.get('trace_v2_error')!r}")
@@ -575,6 +579,43 @@ def latent_logit_margin(wrapper, trace: dict, source_answer: Any, target_answer:
         return None
 
 
+def latent_logit_margin_with_diagnostics(wrapper, trace: dict, source_answer: Any, target_answer: Any) -> dict:
+    source_ids = token_ids(wrapper, source_answer)
+    target_ids = token_ids(wrapper, target_answer)
+    value = latent_logit_margin(wrapper, trace, source_answer, target_answer)
+    return {
+        "source": "latent_logit_lens",
+        "status": "pass" if value is not None else "fail",
+        "reason": "final_captured_state_logit_lens" if value is not None else "latent_logit_unavailable",
+        "margin": value,
+        "source_token_ids": source_ids,
+        "target_token_ids": target_ids,
+        "source_token_len": len(source_ids),
+        "target_token_len": len(target_ids),
+        "uses_first_token_only": len(source_ids) != 1 or len(target_ids) != 1,
+    }
+
+
+def _finite_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if np.isfinite(numeric) else None
+
+
+def select_continuous_margin(score_diag: dict, latent_diag: dict) -> tuple[float | None, str | None]:
+    score_margin = _finite_or_none(score_diag.get("margin") if isinstance(score_diag, dict) else None)
+    if isinstance(score_diag, dict) and score_diag.get("status") == "pass" and score_margin is not None:
+        return score_margin, str(score_diag.get("source") or GENERATION_SCORE_MARGIN_SOURCE)
+    latent_margin = _finite_or_none(latent_diag.get("margin") if isinstance(latent_diag, dict) else None)
+    if isinstance(latent_diag, dict) and latent_diag.get("status") == "pass" and latent_margin is not None:
+        return latent_margin, "latent_logit_lens"
+    return None, None
+
+
 def parsed_margin(parsed_answer: str | None, source_answer: str | None, target_answer: str | None) -> float | None:
     if parsed_answer is None or source_answer is None or target_answer is None:
         return None
@@ -713,6 +754,7 @@ def patch_pair(wrapper, sample, cfg_root: dict, *,
         "logprob_margin_shift": patched_summary.get("latent_margin_shift"),
         "latent_margin_shift": patched_summary.get("latent_margin_shift"),
         "effective_margin_shift": patched_summary.get("effective_margin_shift"),
+        "continuous_margin_shift": patched_summary.get("continuous_margin_shift"),
         "latent_logit_margin_shift": patched_summary.get("latent_logit_margin_shift"),
         "margin_source": patched_summary.get("margin_source"),
         "clean_margin_source": patched_summary.get("clean_margin_source"),
@@ -720,6 +762,11 @@ def patch_pair(wrapper, sample, cfg_root: dict, *,
         "clean_generation_score_margin": patched_summary.get("clean_generation_score_margin"),
         "patched_generation_score_margin": patched_summary.get("patched_generation_score_margin"),
         "generation_score_margin_shift": patched_summary.get("generation_score_margin_shift"),
+        "clean_continuous_margin": patched_summary.get("clean_continuous_margin"),
+        "patched_continuous_margin": patched_summary.get("patched_continuous_margin"),
+        "continuous_margin_source": patched_summary.get("continuous_margin_source"),
+        "clean_latent_logit_diagnostic": patched_summary.get("clean_latent_logit_diagnostic"),
+        "patched_latent_logit_diagnostic": patched_summary.get("patched_latent_logit_diagnostic"),
         "clean_score_diagnostic": patched_summary.get("clean_score_diagnostic"),
         "patched_score_diagnostic": patched_summary.get("patched_score_diagnostic"),
         "score_failure_reasons": patched_summary.get("score_failure_reasons"),
@@ -740,6 +787,7 @@ def patch_pair(wrapper, sample, cfg_root: dict, *,
         "reduction": {
             "logprob_margin_shift": patched_summary.get("latent_margin_shift"),
             "effective_margin_shift": patched_summary.get("effective_margin_shift"),
+            "continuous_margin_shift": patched_summary.get("continuous_margin_shift"),
             "latent_logit_margin_shift": patched_summary.get("latent_logit_margin_shift"),
             "answer_transfer_rate": (
                 float(bool(patched_summary.get("answer_transferred")))
@@ -774,45 +822,61 @@ def _patch_record(*, patched_trace: dict, clean_trace: dict, wrapper, sample, so
         target_answer_for_margin,
         label="patched",
     )
-    clean_margin = clean_score_diag.get("margin")
-    patched_margin = patched_score_diag.get("margin")
-    latent_clean_margin = None
-    latent_patched_margin = None
+    clean_generation_margin = clean_score_diag.get("margin")
+    patched_generation_margin = patched_score_diag.get("margin")
+    clean_latent_diag = latent_logit_margin_with_diagnostics(
+        wrapper,
+        clean_trace,
+        source_answer_for_margin,
+        target_answer_for_margin,
+    )
+    patched_latent_diag = latent_logit_margin_with_diagnostics(
+        wrapper,
+        patched_trace,
+        source_answer_for_margin,
+        target_answer_for_margin,
+    )
+    latent_clean_margin = clean_latent_diag.get("margin")
+    latent_patched_margin = patched_latent_diag.get("margin")
+    clean_continuous_margin, clean_continuous_source = select_continuous_margin(
+        clean_score_diag,
+        clean_latent_diag,
+    )
+    patched_continuous_margin, patched_continuous_source = select_continuous_margin(
+        patched_score_diag,
+        patched_latent_diag,
+    )
     generation_score_margin_shift = (
-        patched_margin - clean_margin
+        patched_generation_margin - clean_generation_margin
         if clean_score_diag.get("status") == "pass"
         and patched_score_diag.get("status") == "pass"
-        and patched_margin is not None
-        and clean_margin is not None
+        and patched_generation_margin is not None
+        and clean_generation_margin is not None
         else None
     )
-    margin_source = (
-        GENERATION_SCORE_MARGIN_SOURCE
-        if generation_score_margin_shift is not None
+    latent_logit_margin_shift = (
+        latent_patched_margin - latent_clean_margin
+        if latent_patched_margin is not None and latent_clean_margin is not None
         else None
     )
-    clean_margin_source = margin_source
-    patched_margin_source = margin_source
-    if margin_source is None:
-        latent_clean_margin = latent_logit_margin(
-            wrapper,
-            clean_trace,
-            source_answer_for_margin,
-            target_answer_for_margin,
+    continuous_margin_shift = (
+        patched_continuous_margin - clean_continuous_margin
+        if patched_continuous_margin is not None and clean_continuous_margin is not None
+        else None
+    )
+    continuous_margin_source = None
+    if continuous_margin_shift is not None:
+        continuous_margin_source = (
+            clean_continuous_source
+            if clean_continuous_source == patched_continuous_source
+            else f"{clean_continuous_source}->{patched_continuous_source}"
         )
-        latent_patched_margin = latent_logit_margin(
-            wrapper,
-            patched_trace,
-            source_answer_for_margin,
-            target_answer_for_margin,
-        )
-        if latent_clean_margin is not None and latent_patched_margin is not None:
-            clean_margin = latent_clean_margin
-            patched_margin = latent_patched_margin
-            margin_source = "latent_logit_lens"
-            clean_margin_source = "latent_logit_lens"
-            patched_margin_source = "latent_logit_lens"
-    if margin_source is None:
+    clean_margin = clean_continuous_margin
+    patched_margin = patched_continuous_margin
+    margin_source = continuous_margin_source
+    clean_margin_source = clean_continuous_source
+    patched_margin_source = patched_continuous_source
+    if continuous_margin_shift is None:
         clean_margin = parsed_margin(parsed_clean, parsed_source, parse_candidate(sample.answer))
         patched_margin = parsed_margin(parsed_patched, parsed_source, parse_candidate(sample.answer))
         margin_source = "parsed_answer_fallback"
@@ -840,13 +904,13 @@ def _patch_record(*, patched_trace: dict, clean_trace: dict, wrapper, sample, so
         "patched_margin": patched_margin,
         "latent_margin_shift": margin_shift,
         "effective_margin_shift": margin_shift,
+        "continuous_margin_shift": continuous_margin_shift,
+        "clean_continuous_margin": clean_continuous_margin,
+        "patched_continuous_margin": patched_continuous_margin,
+        "continuous_margin_source": continuous_margin_source,
         "latent_logit_clean_margin": latent_clean_margin,
         "latent_logit_patched_margin": latent_patched_margin,
-        "latent_logit_margin_shift": (
-            latent_patched_margin - latent_clean_margin
-            if latent_patched_margin is not None and latent_clean_margin is not None
-            else None
-        ),
+        "latent_logit_margin_shift": latent_logit_margin_shift,
         "margin_source": margin_source,
         "clean_margin_source": clean_margin_source,
         "patched_margin_source": patched_margin_source,
@@ -855,6 +919,8 @@ def _patch_record(*, patched_trace: dict, clean_trace: dict, wrapper, sample, so
         "generation_score_margin_shift": generation_score_margin_shift,
         "clean_score_diagnostic": clean_score_diag,
         "patched_score_diagnostic": patched_score_diag,
+        "clean_latent_logit_diagnostic": clean_latent_diag,
+        "patched_latent_logit_diagnostic": patched_latent_diag,
         "score_failure_reasons": score_failure_reasons,
         "trace_quality": patched_trace.get("trace_quality"),
         "missing_modules": patched_trace.get("missing_modules"),

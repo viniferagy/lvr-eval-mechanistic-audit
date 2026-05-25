@@ -22,7 +22,7 @@ Latent visual reasoning methods. Recent MLLM work explores different ways to rep
 
 Faithfulness and diagnostic work. Several recent studies already show that latent visual reasoning can fail to use its own latents. CapImagine reports input-to-latent and latent-to-answer disconnects. "What is Holding Back LVR?" shows that replacing latent tokens with uninformative tokens can leave accuracy largely unchanged. "Visual Latents Know More Than They Say" frames a similar suppression problem: latents may contain useful visual information that is not expressed in the answer. These papers make the bare claim "latents may not be used" less novel. Our intended differentiation is a unified causal audit protocol that separates availability, usage, and retention across models, tasks, and intervention sites.
 
-Benchmarks and external anchors. SPD-Faith is a paired spot-the-difference benchmark designed to diagnose multimodal chain-of-thought faithfulness; it is especially useful for counterfactual answer-transfer tests because each sample can have a clean and modified visual fact. MazePlanning provides visual planning samples with natural stage structure, making it useful for retention and stage-decay tests. BLINK provides fine-grained visual perception cases, used here as the T3 mainline perception task. VSI-Bench is reserved for output accuracy sanity only; it is not used as causal audit evidence in the current matrix because the public table available locally lacks image/frame-grid payloads.
+Benchmarks and external anchors. SPD-Faith is a paired spot-the-difference benchmark designed to diagnose multimodal chain-of-thought faithfulness; it is especially useful for counterfactual answer-transfer tests because each sample can have a clean and modified visual fact. MazePlanning provides visual planning samples with natural stage structure, making it useful for retention and stage-decay tests. BLINK provides fine-grained visual perception cases, used here as the T3 mainline perception task. VSI-Bench is reserved for output accuracy sanity only; it is not used as causal audit evidence in the current matrix because the public table available locally lacks image/frame-grid payloads. V*Bench is newly staged as a small high-resolution bbox-localization spotlight task, not as part of the current T1/T2/T3 Main matrix.
 
 ## Methodology
 
@@ -47,6 +47,7 @@ For LVR, the key distinction is query-span audit versus trace-latent audit. Quer
 | T2 SPD-Faith | paired visual counterfactuals and answer transfer | n=200 Findings matrix; n=500 LVR trace-latent scale gate |
 | T3 BLINK | fine-grained perception generalization | n=100 W16 checkpoint on BLINK Art_Style |
 | T4 VSI-Bench | output accuracy sanity only | blocked until local images/frame grids are available |
+| Spotlight V*Bench | high-resolution detail localization with bbox oracle | loader/config/converter implemented; full run planned |
 
 ### Metrics
 
@@ -88,8 +89,8 @@ SPD-Faith n=200 query-span/regression matrix:
 |---|---:|---:|---:|
 | PF-A selectivity | 0.211966 | 0.192499 | 0.179774 |
 | PF-B native_alignment | 0.715810 | 0.688120 | 0.785818 |
-| BF-Patch logprob_margin_shift | -0.002500 | -0.003750 | -0.006797 |
-| BF-Swap swap_margin_shift | 0.003125 | -0.012500 | -0.018828 |
+| BF-Patch legacy logprob_margin_shift | -0.002500 | -0.003750 | -0.006797 |
+| BF-Swap legacy swap_margin_shift | 0.003125 | -0.012500 | -0.018828 |
 | BF-Conf gold_logit_slope | 0.194958 | 0.343618 | 0.069962 |
 | CF-Stage late_delta | 1.804084 | 2.215903 | 1.318340 |
 
@@ -123,14 +124,14 @@ W14-W16 upgrade the six primary LVR metrics to real generation-time hidden-feedb
 |---|---:|---:|---:|
 | PF-A selectivity | 500 | -0.044502 | [-0.054109, -0.035044] |
 | PF-B native_alignment | 500 | 0.842298 | [0.835494, 0.848849] |
-| BF-Patch logprob_margin_shift | 500 | -0.004000 | [-0.040000, 0.032000] |
+| BF-Patch legacy logprob_margin_shift | 500 | -0.004000 | [-0.040000, 0.032000] |
 | BF-Patch answer_transfer_rate | 500 | 0.462000 | secondary summary |
-| BF-Swap swap_margin_shift | 500 | -0.012000 | [-0.048000, 0.024000] |
+| BF-Swap legacy swap_margin_shift | 500 | -0.012000 | [-0.048000, 0.024000] |
 | BF-Swap swap_answer_transfer_rate | 500 | 0.462000 | secondary summary |
 | BF-Conf gold_logit_slope | 500 | 0.150825 | [0.134188, 0.167482] |
 | CF-Stage late_delta | 500 | -3.372306 | [-3.852121, -2.902451] |
 
-The n=500 gate passed trace-latent validation with 6/6 sanity pass and 20 CI rows. The interpretation is mixed but informative: PF-B, BF-Conf, and CF-Stage are stable; BF-Patch and BF-Swap show stable answer-transfer rates around 0.462, but their margin-shift confidence intervals cross zero. A follow-up code path now prefers continuous latent logit-lens margins when generation scores are unavailable, so new runs should report margin provenance and answer-transfer confidence intervals rather than silently falling back to parsed-answer three-value margins.
+The n=500 gate passed trace-latent validation with 6/6 sanity pass and 20 CI rows, but it predates the continuous-margin provenance fix. Its BF-Patch/BF-Swap margin rows should therefore be treated as legacy artifact rows, not as the Main paper-facing BF continuous scalar. New BF-Patch/BF-Swap runs use `continuous_margin_shift`, which accepts aligned generation scores or latent logit-lens margins but excludes parsed-answer fallback from the primary continuous mean. The interpretation of the old n=500 run is mixed but informative: PF-B, BF-Conf, and CF-Stage are stable; BF-Patch and BF-Swap show stable answer-transfer rates around 0.462, but their legacy margin-shift confidence intervals cross zero.
 
 W17 completed the planned light scale gate for the four non-patch trace-latent metrics at n=1000:
 
@@ -162,5 +163,6 @@ It is not yet a final Main-paper causal matrix. The next steps are:
 1. Expand T1/T2/T3 from n=100 checkpoint scale to n=800-1000 where data permits.
 2. Add local VSI-Bench images/frame grids for T4 accuracy sanity.
 3. Keep Monet as a Transformers latent-mode range gate for the Main-shortest path; implement modified-vLLM scheduler-native tracing as a separate high-risk spike.
-4. Replace or supplement PF-B native alignment with DINO-style alignment.
-5. Replace the current fixed-effect regression fallback with full mixed-effects analysis over the full matrix.
+4. Run the V*Bench high-resolution bbox-localization spotlight gate after the Main matrix data staging is complete.
+5. Replace or supplement PF-B native alignment with DINO-style alignment.
+6. Replace the current fixed-effect regression fallback with full mixed-effects analysis over the full matrix.

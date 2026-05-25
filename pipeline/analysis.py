@@ -25,6 +25,7 @@ import numpy as np
 
 from .results import split_metric_results
 from .stats.bootstrap import paired_bootstrap
+from .stats.mixed_effects import fit_mixed_effects
 
 logger = logging.getLogger("lvr_eval.analysis")
 
@@ -449,12 +450,16 @@ def build_summary_with_ci(metric_results: list[dict], seed: int = 260523) -> lis
             continue
         metric_id = str(envelope.get("metric_id"))
         model = str(envelope.get("model"))
+        task = str(envelope.get("task") or payload.get("task") or (payload.get("config") or {}).get("task") or "unknown")
+        source_run_dir = envelope.get("source_run_dir") or payload.get("source_run_dir")
         for scalar, values in sorted(_numeric_sample_scalars(payload).items()):
             ci = paired_bootstrap(values, seed=seed)
             if ci is None:
                 rows.append({
                     "metric_id": metric_id,
                     "model": model,
+                    "task": task,
+                    "source_run_dir": source_run_dir,
                     "scalar": scalar,
                     "n": 0,
                     "skip_reason": "empty_samples",
@@ -464,6 +469,8 @@ def build_summary_with_ci(metric_results: list[dict], seed: int = 260523) -> lis
             rows.append({
                 "metric_id": metric_id,
                 "model": model,
+                "task": task,
+                "source_run_dir": source_run_dir,
                 "scalar": scalar,
                 **ci.as_dict(),
             })
@@ -480,8 +487,10 @@ def run_analysis(ablation: dict | None, decay: dict | None, out_dir: str,
         ablation.update({k: v for k, v in metric_ablation.items() if k not in ablation})
         decay.update({k: v for k, v in metric_decay.items() if k not in decay})
         plot_generic_metric_results(metric_results, out_dir)
+        summary_with_ci = build_summary_with_ci(metric_results)
         with open(os.path.join(out_dir, "summary_with_ci.json"), "w", encoding="utf-8") as f:
-            json.dump(build_summary_with_ci(metric_results), f, indent=2, ensure_ascii=False)
+            json.dump(summary_with_ci, f, indent=2, ensure_ascii=False)
+        fit_mixed_effects(metric_results, summary_rows=summary_with_ci, out_path=os.path.join(out_dir, "mixed_effects_summary.json"))
 
     if ablation:
         plot_ablation(ablation, out_dir)

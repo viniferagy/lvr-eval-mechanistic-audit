@@ -19,9 +19,9 @@ LEGACY_RESULT_PREFIXES = {
 PREFIX_TO_METRIC_ID = {prefix: metric_id for metric_id, prefix in LEGACY_RESULT_PREFIXES.items()}
 
 
-def make_metric_result(metric_id: str, model_tag: str, payload: dict) -> dict:
+def make_metric_result(metric_id: str, model_tag: str, payload: dict, *, task: str | None = None) -> dict:
     spec = get_metric(metric_id)
-    return {
+    envelope = {
         "metric_id": spec.metric_id,
         "metric_name": spec.title,
         "legacy_name": spec.legacy_name,
@@ -29,6 +29,9 @@ def make_metric_result(metric_id: str, model_tag: str, payload: dict) -> dict:
         "result_type": spec.kind,
         "payload": payload,
     }
+    if task is not None:
+        envelope["task"] = str(task)
+    return envelope
 
 
 def legacy_result_path(out_dir: str, metric_id: str, model_tag: str) -> str | None:
@@ -38,8 +41,13 @@ def legacy_result_path(out_dir: str, metric_id: str, model_tag: str) -> str | No
     return os.path.join(out_dir, f"{prefix}_{model_tag}.json")
 
 
-def write_metric_result(out_dir: str, metric_id: str, model_tag: str, payload: dict) -> dict:
-    envelope = make_metric_result(metric_id, model_tag, payload)
+def write_metric_result(out_dir: str, metric_id: str, model_tag: str, payload: dict, *, task: str | None = None) -> dict:
+    if task is not None and isinstance(payload, dict):
+        payload.setdefault("task", str(task))
+        config = payload.get("config")
+        if isinstance(config, dict):
+            config.setdefault("task", str(task))
+    envelope = make_metric_result(metric_id, model_tag, payload, task=task)
 
     legacy_path = legacy_result_path(out_dir, metric_id, model_tag)
     if legacy_path is not None:

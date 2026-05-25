@@ -1,7 +1,12 @@
 """Sanity checks for W2 v2 metric payloads."""
 from __future__ import annotations
 
+import math
+
 from .common import FAIL, PASS, WARN, is_finite_scalar, make_check, make_report
+
+
+ACCEPTED_TRACE_QUALITIES = {"instrumented_sparse_v0", "monet_vllm_latent_v0"}
 
 
 def _v2_cfg(cfg: dict | None) -> dict:
@@ -18,6 +23,14 @@ def _min_pairs(cfg: dict | None) -> int:
 
 def _max_error_ratio(cfg: dict | None) -> float:
     return float(_v2_cfg(cfg).get("max_error_ratio", 0.2))
+
+
+def _parsed_fallback_warn_ratio(cfg: dict | None) -> float:
+    return float(_v2_cfg(cfg).get("parsed_fallback_warn_ratio", 0.2))
+
+
+def _parsed_fallback_fail_ratio(cfg: dict | None) -> float:
+    return float(_v2_cfg(cfg).get("parsed_fallback_fail_ratio", 0.5))
 
 
 def _w3_cfg(cfg: dict | None) -> dict:
@@ -83,7 +96,7 @@ def check_trace_v2_result(payload: dict, cfg: dict | None = None) -> dict:
         prefix = f"sample_{idx}"
         checks.append(make_check(
             f"{prefix}_instrumented",
-            PASS if sample.get("trace_quality") == "instrumented_sparse_v0" else FAIL,
+            PASS if sample.get("trace_quality") in ACCEPTED_TRACE_QUALITIES else FAIL,
             trace_quality=sample.get("trace_quality"),
         ))
         checks.append(make_check(
@@ -199,8 +212,8 @@ def _check_cells(metric_id: str, payload: dict, cfg: dict | None = None) -> dict
             elif margin_source == "parsed_answer_fallback":
                 parsed_margin_records += 1
             if (
-                record.get("trace_quality") == "instrumented_sparse_v0"
-                and record.get("source_trace_quality") == "instrumented_sparse_v0"
+                record.get("trace_quality") in ACCEPTED_TRACE_QUALITIES
+                and record.get("source_trace_quality") in ACCEPTED_TRACE_QUALITIES
                 and int(record.get("n_patch_applied") or 0) >= 1
             ):
                 trace_records += 1
@@ -217,9 +230,33 @@ def _check_cells(metric_id: str, payload: dict, cfg: dict | None = None) -> dict
         if trace_records > 0 and valid_scoring == 0:
             checks[-1]["status"] = WARN
             checks[-1]["values"]["reason"] = "continuous_margin_unavailable"
+        margin_total = continuous_margin_records + parsed_margin_records
+        parsed_ratio = (
+            float(parsed_margin_records) / float(margin_total)
+            if margin_total else math.nan
+        )
+        warn_ratio = _parsed_fallback_warn_ratio(cfg)
+        fail_ratio = _parsed_fallback_fail_ratio(cfg)
+        if margin_total == 0:
+            parsed_status = WARN
+        elif parsed_ratio > fail_ratio:
+            parsed_status = FAIL
+        elif parsed_ratio > warn_ratio:
+            parsed_status = WARN
+        else:
+            parsed_status = PASS
         checks.append(make_check(
             "continuous_margin_source",
             PASS if continuous_margin_records > 0 else WARN,
+            continuous_margin_records=continuous_margin_records,
+            parsed_answer_fallback_records=parsed_margin_records,
+        ))
+        checks.append(make_check(
+            "parsed_fallback_ratio",
+            parsed_status,
+            parsed_fallback_ratio=None if math.isnan(parsed_ratio) else parsed_ratio,
+            warn_ratio=warn_ratio,
+            fail_ratio=fail_ratio,
             continuous_margin_records=continuous_margin_records,
             parsed_answer_fallback_records=parsed_margin_records,
         ))
@@ -357,8 +394,8 @@ def check_lvr_latent_patch_result(payload: dict, cfg: dict | None = None) -> dic
         if record.get("error") is not None:
             continue
         if (
-            record.get("trace_quality") == "instrumented_sparse_v0"
-            and record.get("source_trace_quality") == "instrumented_sparse_v0"
+            record.get("trace_quality") in ACCEPTED_TRACE_QUALITIES
+            and record.get("source_trace_quality") in ACCEPTED_TRACE_QUALITIES
             and not record.get("trace_v2_error")
             and record.get("missing_modules") == []
         ):

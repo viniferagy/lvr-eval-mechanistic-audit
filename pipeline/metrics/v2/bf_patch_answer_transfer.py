@@ -46,7 +46,8 @@ def build_schema() -> dict:
     return {
         "metric_id": METRIC_ID,
         "grid": patch_grid(),
-        "scalars": ["logprob_margin_shift", "answer_transfer_rate", "n_paired"],
+        "scalars": ["continuous_margin_shift", "answer_transfer_rate", "n_paired"],
+        "legacy_scalars": ["logprob_margin_shift"],
         "status": "runnable_v0",
         "trace_latent_optional": True,
     }
@@ -415,11 +416,18 @@ def _cell_summary(cell: dict, records: list[dict]) -> dict:
         if r.get("latent_logit_margin_shift") is not None
         and np.isfinite(float(r["latent_logit_margin_shift"]))
     ]
+    continuous_shifts = [
+        float(r["continuous_margin_shift"])
+        for r in records
+        if r.get("continuous_margin_shift") is not None
+        and np.isfinite(float(r["continuous_margin_shift"]))
+    ]
     score_diagnostics = TL.score_diagnostic_summary(records)
     return {
         **cell,
         "logprob_margin_shift": float(np.mean(valid_shifts)) if valid_shifts else None,
         "effective_margin_shift": float(np.mean(effective_shifts)) if effective_shifts else None,
+        "continuous_margin_shift": float(np.mean(continuous_shifts)) if continuous_shifts else None,
         "latent_logit_margin_shift": float(np.mean(latent_logit_shifts)) if latent_logit_shifts else None,
         "logit_margin_shift": float(np.mean([
             float(r["logit_margin_shift"])
@@ -463,11 +471,18 @@ def reduce_cells(cells: list[dict]) -> dict | None:
         if c.get("latent_logit_margin_shift") is not None
         and np.isfinite(float(c["latent_logit_margin_shift"]))
     ]
+    continuous_shifts = [
+        float(c["continuous_margin_shift"])
+        for c in cells
+        if c.get("continuous_margin_shift") is not None
+        and np.isfinite(float(c["continuous_margin_shift"]))
+    ]
     if not shifts and not transfers:
         return None
     return {
         "logprob_margin_shift": float(np.mean(shifts)) if shifts else None,
         "effective_margin_shift": float(np.mean(effective_shifts)) if effective_shifts else None,
+        "continuous_margin_shift": float(np.mean(continuous_shifts)) if continuous_shifts else None,
         "latent_logit_margin_shift": float(np.mean(latent_logit_shifts)) if latent_logit_shifts else None,
         "logit_margin_shift": float(np.mean([
             float(c["logit_margin_shift"]) for c in cells
@@ -498,6 +513,7 @@ def _flatten_sample_records(cells: list[dict]) -> list[dict]:
                 "reduction": {
                     "logprob_margin_shift": record.get("logprob_margin_shift"),
                     "effective_margin_shift": record.get("effective_margin_shift"),
+                    "continuous_margin_shift": record.get("continuous_margin_shift"),
                     "latent_logit_margin_shift": record.get("latent_logit_margin_shift"),
                     "generation_score_margin_shift": record.get("generation_score_margin_shift"),
                     "logit_margin_shift": record.get("logit_margin_shift"),

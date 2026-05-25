@@ -117,6 +117,10 @@ def load_probe_set(cfg_data: dict) -> list[ProbeSample]:
         from .data_vsi import load_vsi
 
         samples = load_vsi(cfg_data)
+    elif src == "vstar":
+        from .data_vstar import load_vstar
+
+        samples = load_vstar(cfg_data)
     else:
         raise ValueError(f"未知 source_type: {src}")
 

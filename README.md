@@ -53,6 +53,7 @@ lvr-eval-mechanistic-audit/
 ├── config.main_maze_n1000.yaml
 ├── config.main_blink_n1000.yaml
 ├── config.main_vsi_accuracy.yaml
+├── config.main_vstar_n191.yaml
 ├── config.lvr_latent_patch.range.yaml
 ├── config.lvr_latent_patch.stepsweep.yaml
 ├── config.lvr_latent_patch.stepsweep_s2.yaml
@@ -69,6 +70,7 @@ lvr-eval-mechanistic-audit/
 │   ├── prepare_maze_planning_hf.py
 │   ├── prepare_blink_hf.py
 │   ├── prepare_vsi_bench_hf.py
+│   ├── prepare_vstar_hf.py
 │   ├── prepare_monet_sft_hf.py
 │   ├── validate_spd_range.py
 │   ├── validate_capacity_sweep.py
@@ -170,8 +172,8 @@ There are three metric layers.
    |---|---|---|
    | `pf_a_corruption_selectivity` | `selectivity` | runnable-v0 |
    | `pf_b_patch_alignment` | `native_alignment` | runnable native-attention proxy |
-   | `bf_patch_answer_transfer` | `logprob_margin_shift` | runnable-v0 sequence logprob scoring |
-   | `bf_swap_latent_replacement` | `swap_margin_shift` | runnable-v0 with self/reverse/random controls |
+   | `bf_patch_answer_transfer` | `continuous_margin_shift` | Main-facing continuous margin; legacy `logprob_margin_shift` retained |
+   | `bf_swap_latent_replacement` | `continuous_margin_shift` | Main-facing continuous margin; legacy `swap_margin_shift` retained |
    | `bf_conf_calibrated_progression` | `gold_logit_slope` | runnable-v0 |
    | `cf_stage_decay` | `late_delta` | runnable-v0; `late_retention` is diagnostic only |
 
@@ -210,7 +212,7 @@ W2 v2 metrics are validated as runnable-v0 gates. They are not yet full paper-gr
 
    The LVR trace-latent SPD `n=500` six-metric scale gate completed on 2026-05-25 and passed `tools/validate_trace_latent_gate.py` at `runs/w16_lvr_trace_latent_spd_n500_sharded/merged`. The W17 light gate completed on 2026-05-26 at `runs/w17_lvr_trace_latent_spd_n1000_light/merged`, with PF-A, PF-B, BF-Conf, and CF-Stage at `n=1000`; BF-Patch/BF-Swap are intentionally disabled in this light config. A hundred-scale real matrix was also completed to verify the full path before launching the larger cross-task matrix: LVR trace-latent SPD `n=100` passed at `runs/w16_lvr_trace_latent_spd_n100_sharded/merged`, and the T1/T2/T3 matrix passed `tools/validate_main_matrix.py` with 42 metric rows and 168 CI rows at `runs/w16_main_matrix_t1_t2_t3_n100/merged`. T4 VSI-Bench did not run because the public HF table has scene metadata but no local visual frames/frame grids.
 
-   BF-Patch/BF-Swap trace-latent margins now diagnose generation-score reliability explicitly. New runs record `clean_score_diagnostic` and `patched_score_diagnostic` separately, use generation scores only when the generated candidate token aligns with the score index, and otherwise fall back to `latent_logit_lens` before the final parsed-answer fallback. The validators surface failure-reason counts so a Main run can distinguish missing scores, tokenization issues, and decision-index mismatch instead of hiding them behind one fallback label.
+   BF-Patch/BF-Swap trace-latent margins now diagnose generation-score reliability explicitly. New runs record `clean_score_diagnostic` and `patched_score_diagnostic` separately, use generation scores only when the generated candidate token aligns with the score index, and otherwise fall back to `latent_logit_lens` before the final parsed-answer fallback. The Main-facing scalar is `continuous_margin_shift`, which excludes parsed-answer fallback; `effective_margin_shift` and legacy `logprob_margin_shift` / `swap_margin_shift` remain compatibility fields. The validators surface failure-reason counts so a Main run can distinguish missing scores, tokenization issues, and decision-index mismatch instead of hiding them behind one fallback label.
 
 ## Data Sources
 
@@ -223,10 +225,11 @@ Supported `data.source_type` values include:
 - `maze`
 - `blink`
 - `vsi`
+- `vstar`
 
 `spd_faith` is the paired counterfactual entry point used for the W2 range gate. It expects fields for clean/counterfactual images, clean/counterfactual answers, `paired_id`, and either bbox or region-mask oracle metadata.
 
-`blink` is the W16 fine-grained perception task. If no region metadata is present, PF-A/PF-B use center fallback and the run must be interpreted as weak-oracle diagnostic evidence. `vsi` is reserved for output accuracy sanity, usually with static frame-grid images.
+`blink` is the W16 fine-grained perception task. If no region metadata is present, PF-A/PF-B use center fallback and the run must be interpreted as weak-oracle diagnostic evidence. `vsi` is reserved for output accuracy sanity, usually with static frame-grid images. `vstar` is the V*Bench high-resolution bbox-localization spotlight task; it requires bbox metadata and should not use center fallback.
 
 Check the local LVR model and external `VincentLeebang/lvr` checkout without loading model weights:
 
@@ -277,9 +280,13 @@ Prepare BLINK and VSI-Bench manifests:
   --split test \
   --image-root /path/to/local/vsi/frame_grids \
   --out data/vsi_bench
+
+./venv/bin/python tools/prepare_vstar_hf.py \
+  --split test \
+  --out data/vstar
 ```
 
-BLINK is a multi-config Hugging Face dataset; `--configs all` concatenates the official configs. VSI-Bench's public HF table provides question and scene metadata, so the converter needs a local image/frame-grid root to write runnable visual samples.
+BLINK is a multi-config Hugging Face dataset; `--configs all` concatenates the official configs. VSI-Bench's public HF table provides question and scene metadata, so the converter needs a local image/frame-grid root to write runnable visual samples. V*Bench is small (`n=191`) and bbox-centric, so it is tracked as a spotlight gate rather than as a Main T1/T2/T3 matrix task.
 
 For a tiny conversion smoke:
 
@@ -430,14 +437,14 @@ bash tools/run_and_hold.sh 0,1,2,3 bash tools/launch_main_matrix.sh \
 |---|---|---:|---:|---:|
 | PF-A | `selectivity` | 500 | -0.044502 | [-0.054109, -0.035044] |
 | PF-B | `native_alignment` | 500 | 0.842298 | [0.835494, 0.848849] |
-| BF-Patch | `logprob_margin_shift` | 500 | -0.004000 | [-0.040000, 0.032000] |
-| BF-Swap | `swap_margin_shift` | 500 | -0.012000 | [-0.048000, 0.024000] |
+| BF-Patch | legacy `logprob_margin_shift` | 500 | -0.004000 | [-0.040000, 0.032000] |
+| BF-Swap | legacy `swap_margin_shift` | 500 | -0.012000 | [-0.048000, 0.024000] |
 | BF-Conf | `gold_logit_slope` | 500 | 0.150825 | [0.134188, 0.167482] |
 | CF-Stage | `late_delta` | 500 | -3.372306 | [-3.852121, -2.902451] |
 
 Secondary transfer rates in the same run: BF-Patch `answer_transfer_rate=0.462`, BF-Swap `swap_answer_transfer_rate=0.462`.
 
-The W16 n=500 artifact predates the generation-score diagnostic fields, so it should be revalidated with `--compat-allow-legacy-margin`. New BF-Patch/BF-Swap runs should omit that compatibility flag and may add `--require-score-diagnostics`.
+The W16 n=500 artifact predates the generation-score diagnostic fields, so it should be revalidated with `--compat-allow-legacy-margin`. New BF-Patch/BF-Swap runs should omit that compatibility flag, may add `--require-score-diagnostics`, and should treat `continuous_margin_shift` as the Main-facing primary scalar. Legacy `logprob_margin_shift` / `swap_margin_shift` remain only for historical artifacts and compatibility tooling.
 
 Recorded W17 LVR trace-latent `n=1000` light result:
 

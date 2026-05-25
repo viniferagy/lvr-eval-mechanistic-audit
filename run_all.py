@@ -347,6 +347,7 @@ def main():
 
     metric_ids = selected_metric_ids(args.only, cfg)
     log.info("selected metrics = %s", " ".join(metric_ids) if metric_ids else "(none)")
+    task = str((cfg.get("data") or {}).get("source_type") or "unknown")
     validation_cfg = cfg.get("validation", {})
     do_sanity = validation_cfg.get("run_sanity", True) and not args.no_sanity
 
@@ -375,7 +376,7 @@ def main():
 
         for metric_id in metric_ids:
             res = run_metric(metric_id, wrapper, samples, cfg, tag)
-            metric_results.append(write_metric_result(out_dir, metric_id, tag, res))
+            metric_results.append(write_metric_result(out_dir, metric_id, tag, res, task=task))
             if metric_id in {"bf1_latent_ablation", "bf1_layer_ablation"}:
                 ablation_results[tag] = res
             elif metric_id == "cf2_pf_decay_curve":

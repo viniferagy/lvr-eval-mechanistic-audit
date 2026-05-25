@@ -19,14 +19,16 @@ primary_metrics:
     status: "runnable_v0_validated"
   - metric_id: "bf_patch_answer_transfer"
     family: "BF"
-    primary_scalar: "logprob_margin_shift"
-    version: "0.2-w2-final-gate"
-    status: "runnable_v0_validated"
+    primary_scalar: "continuous_margin_shift"
+    legacy_scalar: "logprob_margin_shift"
+    version: "0.4-main-continuous-margin"
+    status: "main_shortest_path_primary"
   - metric_id: "bf_swap_latent_replacement"
     family: "BF"
-    primary_scalar: "swap_margin_shift"
-    version: "0.2-w2-final-gate"
-    status: "runnable_v0_validated"
+    primary_scalar: "continuous_margin_shift"
+    legacy_scalar: "swap_margin_shift"
+    version: "0.4-main-continuous-margin"
+    status: "main_shortest_path_primary"
   - metric_id: "bf_conf_calibrated_progression"
     family: "BF"
     primary_scalar: "gold_logit_slope"
@@ -66,6 +68,9 @@ statistics:
     formula: "metric_value ~ model + task + (1|dataset_or_sample_group)"
     implemented_fallback: "value ~ model + task"
     status: "implemented_fixed_effects_fallback_for_main_readiness"
+accepted_trace_qualities:
+  - "instrumented_sparse_v0"
+  - "monet_vllm_latent_v0"
 evidence_level_policy:
   qwen_query_span_control:
     models:
@@ -78,6 +83,9 @@ evidence_level_policy:
       - "lvr_7b"
     evidence_type: "generation-time hidden-feedback trace-latent intervention"
     trace_quality: "instrumented_sparse_v0"
+    accepted_trace_qualities:
+      - "instrumented_sparse_v0"
+      - "monet_vllm_latent_v0"
     boundary: "Applies only to configs using lvr_qwen2_5_vl_traced and trace_latent.enabled=true."
   monet_transformers_latent_range_gate:
     models:
@@ -233,3 +241,28 @@ gates:
       - "lvr_7b"
     status: "implemented_pending_full_gpu_run"
     boundary: "T4 is output accuracy sanity only; BLINK PF/PF-B may use weak-oracle center fallback when bbox metadata is absent"
+  - gate_id: "W20_spotlight_vstar_high_resolution"
+    model: "lvr_7b"
+    public_data: "craigwu/vstar_bench"
+    adapter_arch: "lvr_qwen2_5_vl_traced"
+    config: "config.main_vstar_n191.yaml"
+    sample_budget: 191
+    metrics:
+      - "pf_a_corruption_selectivity"
+      - "pf_b_patch_alignment"
+      - "bf_conf_calibrated_progression"
+      - "cf_stage_decay"
+    primary_scalars:
+      - "selectivity"
+      - "native_alignment"
+      - "gold_logit_slope"
+      - "late_delta"
+    spotlight_hypothesis: |
+      PF-A selectivity on V*Bench should be substantially larger than on SPD-Faith,
+      because V*Bench's relevant region is small, well-localized, and bbox-annotated.
+      A null or reversed result on LVR vs Qwen baselines would be evidence that
+      LVR's latent visual reasoning does not preferentially attend to bbox regions.
+    status: "planned"
+    boundary: |
+      V*Bench has 191 total samples; this is a small-n spotlight gate,
+      not a Main matrix entry. CI widths will be large; report descriptively.

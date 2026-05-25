@@ -11,8 +11,8 @@ import numpy as np
 PRIMARY_SCALARS = {
     "pf_a_corruption_selectivity": "selectivity",
     "pf_b_patch_alignment": "native_alignment",
-    "bf_patch_answer_transfer": "logprob_margin_shift",
-    "bf_swap_latent_replacement": "swap_margin_shift",
+    "bf_patch_answer_transfer": "continuous_margin_shift",
+    "bf_swap_latent_replacement": "continuous_margin_shift",
     "bf_conf_calibrated_progression": "gold_logit_slope",
     "cf_stage_decay": "late_delta",
 }
@@ -54,6 +54,17 @@ def _rows_from_metric_results(metric_results: list[dict]) -> list[dict]:
         payload = envelope.get("payload") or {}
         reduction = payload.get("reduction") or {}
         value = reduction.get(scalar)
+        if value is None:
+            samples = payload.get("samples") or []
+            values = []
+            for sample in samples:
+                if not isinstance(sample, dict) or sample.get("error") is not None:
+                    continue
+                sample_reduction = sample.get("reduction") or {}
+                if sample_reduction.get(scalar) is not None:
+                    values.append(sample_reduction.get(scalar))
+            if values:
+                value = float(np.mean([float(item) for item in values]))
         if value is None:
             continue
         try:

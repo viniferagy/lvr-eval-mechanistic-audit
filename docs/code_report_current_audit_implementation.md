@@ -49,6 +49,7 @@ Implemented loaders:
 - `pipeline/data_maze.py`: loads MazePlanning image, question, answer, rationale, and optional bboxes. This is the T1 planning/retention task.
 - `pipeline/data_blink.py`: loads BLINK manifest rows and appends answer choices to the prompt when present. If no bboxes exist, it records `weak_oracle=True`; PF validators can either fail or warn depending on config.
 - `pipeline/data_vsi.py`: loads VSI-Bench-style static frame-grid image records for output accuracy sanity. The current public HF table available locally has question metadata but no image/frame-grid payloads, so real T4 runs require local visual files.
+- `pipeline/data_vstar.py`: loads V*Bench high-resolution bbox-localization records. It requires bbox metadata by default, records high-resolution metadata, appends answer choices to prompts, and is intended as a small-n spotlight task rather than a Main matrix task.
 
 The loader layer is structurally sound for completed runs. The known data limitation is external: VSI-Bench images are absent locally, and full BLINK staging beyond Art_Style n=100 remains future work.
 
@@ -138,12 +139,12 @@ forward_pre.last_position_hidden_state
 
 For generation-score margins, the code now uses an aligned diagnostic path rather than the old `scores[-1]` assumption. `score_margin_with_diagnostics()` derives generated token ids from the adapter trace, checks whether the source/target candidates are single-token answers, finds the generated candidate token, and uses the matching score index only when the token-score alignment is explicit. Otherwise it records a machine-readable failure reason such as `missing_scores`, `multi_token_candidate`, `decision_index_mismatch`, `score_generated_length_mismatch`, `bad_score_shape`, or `nonfinite_score`.
 
-When aligned generation scores are unavailable, the trace-latent path falls back to a continuous latent logit-lens margin computed from the final captured hidden-feedback state through `final_norm` and `lm_head`. Only if both continuous paths fail does it use the parsed constrained-answer fallback. Patch records expose `clean_score_diagnostic`, `patched_score_diagnostic`, `score_failure_reasons`, `margin_source`, `clean_margin_source`, `patched_margin_source`, `generation_score_margin_shift`, `effective_margin_shift`, and `latent_logit_margin_shift`. Validators can fail runs that rely too heavily on parsed-answer fallback, and can also require diagnostic summaries for new patch/swap artifacts.
+When aligned generation scores are unavailable, the trace-latent path falls back to a continuous latent logit-lens margin computed from the final captured hidden-feedback state through `final_norm` and `lm_head`. Only if both continuous paths fail does it use the parsed constrained-answer fallback. Patch records expose `clean_score_diagnostic`, `patched_score_diagnostic`, `score_failure_reasons`, `margin_source`, `clean_margin_source`, `patched_margin_source`, `generation_score_margin_shift`, `continuous_margin_shift`, `effective_margin_shift`, and `latent_logit_margin_shift`. Validators can fail runs that rely too heavily on parsed-answer fallback, and can also require diagnostic summaries for new patch/swap artifacts.
 
 Primary scalar:
 
 ```text
-logprob_margin_shift
+continuous_margin_shift
 ```
 
 Important secondary scalar:
@@ -165,13 +166,19 @@ Validators require these control cells for full trace-latent gates.
 Primary scalar:
 
 ```text
-swap_margin_shift
+continuous_margin_shift
 ```
 
 Important secondary scalar:
 
 ```text
 swap_answer_transfer_rate
+```
+
+Compatibility scalar:
+
+```text
+swap_margin_shift
 ```
 
 ### BF-Conf: `bf_conf_calibrated_progression`
@@ -272,7 +279,7 @@ The main validators are:
 
 - `tools/validate_trace_latent_gate.py`: requires all expected trace-latent metrics, `trace_latent=True`, primary scalars, enough instrumented trace records, patch successes for BF metrics, control cells for BF-Swap, CI rows, sanity pass, trace-latent plots, transfer-rate CI rows, and acceptable parsed-fallback margin ratio for new runs. It can also require generation-score diagnostic summaries with `--require-score-diagnostics`.
 - `tools/validate_trace_margin_quality.py`: checks patch metric `margin_source` provenance directly, reports generation-score failure reason counts, and fails when parsed-answer fallback exceeds the configured threshold.
-- `tools/validate_main_paper_readiness.py`: checks manifest evidence-level discipline, `summary_with_ci.json`, `mixed_effects_summary.json`, and optionally trace margin quality.
+- `tools/validate_main_paper_readiness.py`: checks manifest evidence-level discipline, `summary_with_ci.json`, `mixed_effects_summary.json`, and optionally trace margin quality. It has three strictness levels: `artifact_contract`, `full_main_matrix`, and `paper_ready`.
 - `tools/validate_main_matrix.py`: checks task/model/metric coverage, sample thresholds, BF pair thresholds, and `summary_with_ci.json`.
 - `tools/validate_monet_latent.py`: checks Monet metric ID/model ID, latent mode path, `vllm_scheduler_native=false`, patch counts, captured state counts, shape matches, prereg lock, sanity pass, and CI rows.
 - `tools/validate_findings_gate.py`: checks the complete Findings evidence package, including true LVR latent gates, W7 SPD, and W9 Maze.
@@ -321,6 +328,7 @@ No syntax or validator errors are known on the completed experiment paths. The f
 5. BLINK Art_Style n=100 has weak-oracle center fallback for PF metrics because reliable bboxes are absent locally.
 6. Query-span matrices and trace-latent LVR gates answer different questions. W7/W9/W16 main matrix checkpoint should not be described as entirely real latent intervention evidence.
 7. BF-Patch and BF-Swap margin shifts in the n=500 trace-latent run are near zero with confidence intervals crossing zero; answer-transfer rates are secondary but stable around 0.462. New patch/swap runs should use the continuous margin provenance checks and transfer-rate CI rows. The W17 `n=1000` light run intentionally disables BF-Patch/BF-Swap, so margin provenance is not expected in that artifact.
+8. V*Bench support is implemented as `source_type=vstar` with mandatory bbox metadata and high-resolution image preservation. It is a planned spotlight gate, not a completed Main matrix result.
 
 ## 11. Implementation Conclusion
 

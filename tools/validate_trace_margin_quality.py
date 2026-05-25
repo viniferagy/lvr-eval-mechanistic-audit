@@ -84,6 +84,11 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--min-records", type=int, default=1)
     ap.add_argument("--allow-missing-patch-metrics", action="store_true")
     ap.add_argument("--require-score-diagnostics", action="store_true")
+    ap.add_argument(
+        "--compat-allow-legacy-margin",
+        action="store_true",
+        help="Allow pre-provenance artifacts that have records but no margin_source fields.",
+    )
     args = ap.parse_args(argv)
 
     by_metric = _load_payloads(Path(args.run_dir))
@@ -98,7 +103,13 @@ def main(argv: list[str] | None = None) -> None:
         report[metric_id] = quality
         if quality["total"] < args.min_records:
             fail(f"{metric_id} margin records too small: {quality['total']} < {args.min_records}")
-        if quality["continuous"] <= 0:
+        legacy_missing_only = (
+            args.compat_allow_legacy_margin
+            and quality["continuous"] == 0
+            and quality["parsed"] == 0
+            and quality["missing"] == quality["total"]
+        )
+        if quality["continuous"] <= 0 and not legacy_missing_only:
             fail(f"{metric_id} has no continuous margin-source records")
         if args.require_score_diagnostics and quality["diagnostic_records"] <= 0:
             fail(f"{metric_id} missing generation-score diagnostic records")

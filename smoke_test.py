@@ -79,6 +79,7 @@ from tools.build_evidence_pack import main as build_evidence_pack_main
 from tools.build_findings_pack import main as build_findings_pack_main
 from tools.prepare_maze_planning_hf import main as prepare_maze_planning_hf_main
 from tools.prepare_blink_hf import main as prepare_blink_hf_main
+from tools.prepare_vstar_hf import main as prepare_vstar_hf_main
 from tools.prepare_vsi_bench_hf import main as prepare_vsi_bench_hf_main
 from tools.prepare_monet_sft_hf import extract_prompt_answer, strip_latent_tokens
 from tools.validate_findings_gate import main as validate_findings_gate_main
@@ -446,6 +447,61 @@ def test_blink_vsi_loaders_and_prepare_fixtures():
     assert vsi[0].image.size[0] >= 256
     assert "Choices:" in vsi[0].question
     print("  BLINK/VSI prepare tools and loaders -> ok")
+
+
+def test_vstar_loader_and_prepare_fixture():
+    print("\n== 4e. V*Bench loader and converter ==")
+    out_dir = Path(tempfile.mkdtemp(prefix="vstar_fixture_"))
+    source = out_dir / "source"
+    source.mkdir()
+    high_res = Image.new("RGB", (1600, 1200), "white")
+    arr = np.asarray(high_res).copy()
+    arr[200:360, 300:520] = [255, 0, 0]
+    Image.fromarray(arr).save(source / "vstar.png")
+    raw = source / "vstar.json"
+    raw.write_text(json.dumps([
+        {
+            "id": "vstar0",
+            "image": {"path": "vstar.png"},
+            "question": "Which patch contains the red target?",
+            "options": ["A", "B", "C", "D"],
+            "label": "A",
+            "bbox": [300, 200, 520, 360],
+            "category": "spatial_relationship_reasoning",
+        }
+    ]), encoding="utf-8")
+    prepared = out_dir / "prepared"
+    import sys
+
+    old_argv = sys.argv
+    try:
+        sys.argv = [
+            "prepare_vstar_hf.py",
+            "--input-json", str(raw),
+            "--image-root", str(source),
+            "--out", str(prepared),
+            "--max-samples", "1",
+        ]
+        prepare_vstar_hf_main()
+    finally:
+        sys.argv = old_argv
+    stats = json.loads((prepared / "prepare_stats.json").read_text(encoding="utf-8"))
+    assert stats["n_written"] == 1
+    assert stats["n_missing_bbox"] == 0
+    assert stats["n_high_resolution"] == 1
+    vstar = load_probe_set({
+        "source_type": "vstar",
+        "jsonl_path": str(prepared / "manifest.jsonl"),
+        "image_root": str(prepared / "images"),
+        "skip_missing_images": False,
+        "require_bbox": True,
+    })
+    assert len(vstar) == 1
+    assert vstar[0].bboxes and vstar[0].task_metadata["high_resolution"] is True
+    assert "Choices:" in vstar[0].question
+    rel = relevant_mask(vstar[0].image, bboxes=vstar[0].bboxes)
+    assert rel.oracle_source == "bbox" and rel.coverage > 0
+    print("  V*Bench prepare tool, loader, bbox oracle, and high-res metadata -> ok")
 
 
 def test_image_resize_metadata():
@@ -905,14 +961,15 @@ def test_preregistration_and_bootstrap():
     grouped_rows = build_summary_with_ci([
         make_metric_result("bf_patch_answer_transfer", "fake", {
             "samples": [
-                {"id": "a0", "paired_id": "a", "reduction": {"logprob_margin_shift": 1.0}},
-                {"id": "a1", "paired_id": "a", "reduction": {"logprob_margin_shift": 3.0}},
-                {"id": "b0", "paired_id": "b", "reduction": {"logprob_margin_shift": 5.0}},
+                {"id": "a0", "paired_id": "a", "reduction": {"continuous_margin_shift": 1.0}},
+                {"id": "a1", "paired_id": "a", "reduction": {"continuous_margin_shift": 3.0}},
+                {"id": "b0", "paired_id": "b", "reduction": {"continuous_margin_shift": 5.0}},
             ]
-        })
+        }, task="spd_faith")
     ], seed=1)
-    row = next(r for r in grouped_rows if r["scalar"] == "logprob_margin_shift")
+    row = next(r for r in grouped_rows if r["scalar"] == "continuous_margin_shift")
     assert row["n"] == 2 and abs(row["mean"] - 3.5) < 1e-9
+    assert row["task"] == "spd_faith"
     transfer_rows = build_summary_with_ci([
         make_metric_result("bf_patch_answer_transfer", "fake", {
             "samples": [
@@ -945,7 +1002,7 @@ def test_preregistration_and_bootstrap():
         schema = spec.require_run().__globals__.get("build_schema", lambda: {})()
         scalars = set(schema.get("scalars") or [])
         assert item["primary_scalar"] in scalars, item
-        assert item["status"] == "runnable_v0_validated"
+        assert item["status"] in {"runnable_v0_validated", "main_shortest_path_primary"}
     exp = manifest.get("experimental_metrics", [])
     latent_scalars = {
         item["primary_scalar"]
@@ -2200,6 +2257,10 @@ def test_trace_latent_w14_w15_fixtures():
                 scores[-1][0, 2] = value
                 if "mismatch" in str(question):
                     generated_ids = [5]
+            if "monet_trace" in str(question):
+                trace_quality = "monet_vllm_latent_v0"
+            else:
+                trace_quality = "instrumented_sparse_v0"
             generated = "modified" if value > 0 else "original"
             return {
                 "generated_text": generated,
@@ -2216,7 +2277,7 @@ def test_trace_latent_w14_w15_fixtures():
                     }
                     for idx, token_id in enumerate(generated_ids[: len(scores or [])])
                 ],
-                "trace_quality": "instrumented_sparse_v0",
+                "trace_quality": trace_quality,
                 "missing_modules": [],
                 "trace_v2_error": None,
                 "n_lvr_mode_steps": 1,
@@ -2285,6 +2346,13 @@ def test_trace_latent_w14_w15_fixtures():
         "cf_stage": {"families": {"mask": [0.4]}},
     }
     assert TL.enabled(cfg, "pf_a_corruption_selectivity")
+    monet_trace = wrapper.adapter.generate_with_trace(
+        wrapper,
+        sample.image,
+        "monet_trace",
+        trace_capture={"capture_tensors": True},
+    )
+    TL.assert_trace_ok(monet_trace, cfg, "monet_future_trace")
     aligned_trace = wrapper.adapter.generate_with_trace(
         wrapper,
         sample.counterfactual_image,
@@ -2342,6 +2410,7 @@ def test_trace_latent_w14_w15_fixtures():
     assert patch_rec["answer_transferred"] is True
     assert patch_rec["logprob_margin_shift"] is not None
     assert patch_rec["margin_source"] == "latent_logit_lens"
+    assert patch_rec["continuous_margin_shift"] is not None
     assert patch_rec["latent_logit_margin_shift"] is not None
     assert patch_rec["clean_score_diagnostic"]["reason"] == "missing_scores"
     assert patch_rec["patched_score_diagnostic"]["reason"] == "missing_scores"
@@ -2488,9 +2557,9 @@ def test_output_accuracy_and_main_matrix_fixtures():
             )
             for metric_id in metrics:
                 if metric_id == "bf_patch_answer_transfer":
-                    p = {"model": model, "task": task, "n_paired": 3, "cells": [], "samples": [{"id": "a", "paired_id": "a", "reduction": {"logprob_margin_shift": 0.1}}], "reduction": {"logprob_margin_shift": 0.1, "n_paired": 3}}
+                    p = {"model": model, "task": task, "n_paired": 3, "cells": [], "samples": [{"id": "a", "paired_id": "a", "reduction": {"continuous_margin_shift": 0.1}}], "reduction": {"continuous_margin_shift": 0.1, "n_paired": 3}}
                 elif metric_id == "bf_swap_latent_replacement":
-                    p = {"model": model, "task": task, "n_paired": 3, "cells": [], "control_cells": [], "samples": [{"id": "a", "paired_id": "a", "reduction": {"swap_margin_shift": 0.1}}], "reduction": {"swap_margin_shift": 0.1, "n_paired": 3}}
+                    p = {"model": model, "task": task, "n_paired": 3, "cells": [], "control_cells": [], "samples": [{"id": "a", "paired_id": "a", "reduction": {"continuous_margin_shift": 0.1}}], "reduction": {"continuous_margin_shift": 0.1, "n_paired": 3}}
                 else:
                     scalar = {
                         "pf_a_corruption_selectivity": "selectivity",
@@ -2499,7 +2568,7 @@ def test_output_accuracy_and_main_matrix_fixtures():
                         "cf_stage_decay": "late_delta",
                     }[metric_id]
                     p = {"model": model, "task": task, "samples": [{"id": str(i), "reduction": {scalar: 0.1}} for i in range(3)], "reduction": {scalar: 0.1, "n": 3}}
-                env = make_metric_result(metric_id, model, p)
+                env = make_metric_result(metric_id, model, p, task=task)
                 metric_results.append(env)
                 (run_dir / "metrics" / f"{metric_id}_{model}.json").write_text(
                     json.dumps(env, indent=2),
@@ -2511,6 +2580,14 @@ def test_output_accuracy_and_main_matrix_fixtures():
         json.dumps(build_summary_with_ci(metric_results), indent=2),
         encoding="utf-8",
     )
+    assert {
+        ("maze", "qwen2_5_vl_3b", "pf_a_corruption_selectivity", "selectivity"),
+        ("spd_faith", "lvr_7b", "bf_patch_answer_transfer", "continuous_margin_shift"),
+    } <= {
+        (row.get("task"), row.get("model"), row.get("metric_id"), row.get("scalar"))
+        for row in build_summary_with_ci(metric_results)
+        if int(row.get("n") or 0) > 0
+    }
     (merged / "sanity").mkdir()
     (merged / "sanity" / "summary_sanity.json").write_text(
         json.dumps({"overall_status": "pass"}),
@@ -2524,7 +2601,7 @@ def test_output_accuracy_and_main_matrix_fixtures():
         "--min-samples", "3",
         "--bf-min-pairs", "3",
     ])
-    validate_main_paper_readiness_main([str(merged)])
+    validate_main_paper_readiness_main([str(merged), "--mode", "full_main_matrix"])
 
     acc_root = Path(tempfile.mkdtemp(prefix="accuracy_matrix_fixture_"))
     acc_run = acc_root / "vsi_qwen2_5_vl_3b"
@@ -2641,6 +2718,7 @@ def main():
     test_spd_faith_and_maze_loaders()
     test_prepare_maze_planning_fixture()
     test_blink_vsi_loaders_and_prepare_fixtures()
+    test_vstar_loader_and_prepare_fixture()
     test_image_resize_metadata()
     test_pf3_corrupt_after_resize()
     test_lvr_json_loader()

@@ -21,7 +21,8 @@ def build_schema() -> dict:
     return {
         "metric_id": METRIC_ID,
         "grid": patch_grid(DEFAULT_LAYERS, DEFAULT_POSITION_BUCKETS),
-        "scalars": ["swap_margin_shift", "swap_answer_transfer_rate", "n_paired"],
+        "scalars": ["continuous_margin_shift", "swap_answer_transfer_rate", "n_paired"],
+        "legacy_scalars": ["swap_margin_shift"],
         "controls": ["self_swap", "reverse_swap", "random_pair_swap"],
         "status": "runnable_v0",
         "trace_latent_optional": True,
@@ -61,11 +62,18 @@ def _cell_summary(cell: dict, records: list[dict]) -> dict:
         if r.get("latent_logit_margin_shift") is not None
         and np.isfinite(float(r["latent_logit_margin_shift"]))
     ]
+    continuous_shifts = [
+        float(r["continuous_margin_shift"])
+        for r in valid
+        if r.get("continuous_margin_shift") is not None
+        and np.isfinite(float(r["continuous_margin_shift"]))
+    ]
     score_diagnostics = TL.score_diagnostic_summary(records)
     return {
         **cell,
         "swap_margin_shift": _mean(shifts),
         "effective_margin_shift": _mean(effective_shifts),
+        "continuous_margin_shift": _mean(continuous_shifts),
         "latent_logit_margin_shift": _mean(latent_logit_shifts),
         "swap_answer_transfer_rate": _mean(transfers),
         "n_paired": len(records),
@@ -92,6 +100,7 @@ def _flatten_sample_records(cells: list[dict], *, include_controls: bool = False
                 "reduction": {
                     "swap_margin_shift": record.get("logprob_margin_shift"),
                     "effective_margin_shift": record.get("effective_margin_shift"),
+                    "continuous_margin_shift": record.get("continuous_margin_shift"),
                     "latent_logit_margin_shift": record.get("latent_logit_margin_shift"),
                     "generation_score_margin_shift": record.get("generation_score_margin_shift"),
                     "swap_answer_transfer_rate": float(bool(record.get("answer_transferred"))),
@@ -126,11 +135,18 @@ def reduce_cells(cells: list[dict]) -> dict | None:
         if c.get("latent_logit_margin_shift") is not None
         and np.isfinite(float(c["latent_logit_margin_shift"]))
     ]
+    continuous_shifts = [
+        float(c["continuous_margin_shift"])
+        for c in primary_cells
+        if c.get("continuous_margin_shift") is not None
+        and np.isfinite(float(c["continuous_margin_shift"]))
+    ]
     if not shifts and not transfers:
         return None
     return {
         "swap_margin_shift": _mean(shifts),
         "effective_margin_shift": _mean(effective_shifts),
+        "continuous_margin_shift": _mean(continuous_shifts),
         "latent_logit_margin_shift": _mean(latent_logit_shifts),
         "swap_answer_transfer_rate": _mean(transfers),
         "n_paired": int(max((c.get("n_paired", 0) for c in primary_cells), default=0)),
