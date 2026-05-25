@@ -194,7 +194,7 @@ def _check_cells(metric_id: str, payload: dict, cfg: dict | None = None) -> dict
                 if is_finite_scalar(record.get("clean_margin")) and is_finite_scalar(record.get("patched_margin")):
                     valid_scoring += 1
             margin_source = record.get("margin_source")
-            if margin_source in {"generation_scores", "latent_logit_lens"}:
+            if margin_source in {"generation_scores", "generation_scores_aligned_first_token", "latent_logit_lens"}:
                 continuous_margin_records += 1
             elif margin_source == "parsed_answer_fallback":
                 parsed_margin_records += 1
@@ -207,6 +207,13 @@ def _check_cells(metric_id: str, payload: dict, cfg: dict | None = None) -> dict
     checks.append(make_check("answer_sequence_scoring", PASS if valid_scoring > 0 else FAIL,
                              valid_scoring=valid_scoring))
     if (payload.get("config") or {}).get("trace_latent"):
+        score_diag_records = 0
+        score_failure_reason_counts: dict[str, int] = {}
+        for cell in cells:
+            diag = cell.get("generation_score_diagnostics") or {}
+            score_diag_records += int(diag.get("diagnostic_records") or 0)
+            for reason, count in (diag.get("generation_score_failure_reason_counts") or {}).items():
+                score_failure_reason_counts[str(reason)] = score_failure_reason_counts.get(str(reason), 0) + int(count)
         if trace_records > 0 and valid_scoring == 0:
             checks[-1]["status"] = WARN
             checks[-1]["values"]["reason"] = "continuous_margin_unavailable"
@@ -215,6 +222,12 @@ def _check_cells(metric_id: str, payload: dict, cfg: dict | None = None) -> dict
             PASS if continuous_margin_records > 0 else WARN,
             continuous_margin_records=continuous_margin_records,
             parsed_answer_fallback_records=parsed_margin_records,
+        ))
+        checks.append(make_check(
+            "generation_score_diagnostics_recorded",
+            PASS if score_diag_records > 0 else WARN,
+            diagnostic_records=score_diag_records,
+            failure_reason_counts=score_failure_reason_counts,
         ))
         checks.append(make_check(
             "trace_latent_patch_records",
@@ -247,7 +260,7 @@ def check_bf_swap_result(payload: dict, cfg: dict | None = None) -> dict:
     tolerance = float(_v2_cfg(cfg).get("self_swap_max_abs_shift", 0.05))
     trace_latent = bool((payload.get("config") or {}).get("trace_latent"))
     has_continuous_margin = any(
-        (record.get("margin_source") in {"generation_scores", "latent_logit_lens"})
+        (record.get("margin_source") in {"generation_scores", "generation_scores_aligned_first_token", "latent_logit_lens"})
         for cell in (payload.get("cells") or [])
         for record in (cell.get("records") or [])
         if record.get("error") is None

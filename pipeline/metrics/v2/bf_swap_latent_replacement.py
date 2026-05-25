@@ -61,6 +61,7 @@ def _cell_summary(cell: dict, records: list[dict]) -> dict:
         if r.get("latent_logit_margin_shift") is not None
         and np.isfinite(float(r["latent_logit_margin_shift"]))
     ]
+    score_diagnostics = TL.score_diagnostic_summary(records)
     return {
         **cell,
         "swap_margin_shift": _mean(shifts),
@@ -70,6 +71,7 @@ def _cell_summary(cell: dict, records: list[dict]) -> dict:
         "n_paired": len(records),
         "n_success": len(valid),
         "n_error": len(records) - len(valid),
+        "generation_score_diagnostics": score_diagnostics,
         "records": records,
     }
 
@@ -91,6 +93,7 @@ def _flatten_sample_records(cells: list[dict], *, include_controls: bool = False
                     "swap_margin_shift": record.get("logprob_margin_shift"),
                     "effective_margin_shift": record.get("effective_margin_shift"),
                     "latent_logit_margin_shift": record.get("latent_logit_margin_shift"),
+                    "generation_score_margin_shift": record.get("generation_score_margin_shift"),
                     "swap_answer_transfer_rate": float(bool(record.get("answer_transferred"))),
                     "swap_answer_transfer": float(bool(record.get("answer_transferred"))),
                 },

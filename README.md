@@ -210,6 +210,8 @@ W2 v2 metrics are validated as runnable-v0 gates. They are not yet full paper-gr
 
    The LVR trace-latent SPD `n=500` six-metric scale gate completed on 2026-05-25 and passed `tools/validate_trace_latent_gate.py` at `runs/w16_lvr_trace_latent_spd_n500_sharded/merged`. The W17 light gate completed on 2026-05-26 at `runs/w17_lvr_trace_latent_spd_n1000_light/merged`, with PF-A, PF-B, BF-Conf, and CF-Stage at `n=1000`; BF-Patch/BF-Swap are intentionally disabled in this light config. A hundred-scale real matrix was also completed to verify the full path before launching the larger cross-task matrix: LVR trace-latent SPD `n=100` passed at `runs/w16_lvr_trace_latent_spd_n100_sharded/merged`, and the T1/T2/T3 matrix passed `tools/validate_main_matrix.py` with 42 metric rows and 168 CI rows at `runs/w16_main_matrix_t1_t2_t3_n100/merged`. T4 VSI-Bench did not run because the public HF table has scene metadata but no local visual frames/frame grids.
 
+   BF-Patch/BF-Swap trace-latent margins now diagnose generation-score reliability explicitly. New runs record `clean_score_diagnostic` and `patched_score_diagnostic` separately, use generation scores only when the generated candidate token aligns with the score index, and otherwise fall back to `latent_logit_lens` before the final parsed-answer fallback. The validators surface failure-reason counts so a Main run can distinguish missing scores, tokenization issues, and decision-index mismatch instead of hiding them behind one fallback label.
+
 ## Data Sources
 
 Supported `data.source_type` values include:
@@ -373,7 +375,7 @@ Recorded W14-W15 primary results:
 | BF-Conf | `gold_logit_slope` | 0.110406 | [0.0545209, 0.167702] |
 | CF-Stage | `late_delta` | -4.046318 | [-5.252559, -2.870815] |
 
-The W14-W15 validator checks that all six metric payloads are in `trace_latent` mode, that LVR traces have `trace_quality=instrumented_sparse_v0`, that BF patch/swap records applied hidden-feedback patches, that primary CI rows exist, and that trace-latent visualizations were written under `metric_plots/`.
+The W14-W15 validator checks that all six metric payloads are in `trace_latent` mode, that LVR traces have `trace_quality=instrumented_sparse_v0`, that BF patch/swap records applied hidden-feedback patches, that primary CI rows exist, and that trace-latent visualizations were written under `metric_plots/`. For post-diagnostic BF artifacts, add `--require-score-diagnostics` to require machine-readable generation-score failure summaries.
 
 The W16 LVR trace-latent scale gates:
 
@@ -420,7 +422,8 @@ bash tools/run_and_hold.sh 0,1,2,3 bash tools/launch_main_matrix.sh \
 ./venv/bin/python tools/validate_trace_latent_gate.py \
   runs/w16_lvr_trace_latent_spd_n500_sharded/merged \
   --min-pairs 500 \
-  --min-samples 500
+  --min-samples 500 \
+  --compat-allow-legacy-margin
 ```
 
 | metric | scalar | n | value | 95% bootstrap CI |
@@ -433,6 +436,8 @@ bash tools/run_and_hold.sh 0,1,2,3 bash tools/launch_main_matrix.sh \
 | CF-Stage | `late_delta` | 500 | -3.372306 | [-3.852121, -2.902451] |
 
 Secondary transfer rates in the same run: BF-Patch `answer_transfer_rate=0.462`, BF-Swap `swap_answer_transfer_rate=0.462`.
+
+The W16 n=500 artifact predates the generation-score diagnostic fields, so it should be revalidated with `--compat-allow-legacy-margin`. New BF-Patch/BF-Swap runs should omit that compatibility flag and may add `--require-score-diagnostics`.
 
 Recorded W17 LVR trace-latent `n=1000` light result:
 

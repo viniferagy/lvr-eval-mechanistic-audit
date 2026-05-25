@@ -11,10 +11,12 @@ This report records the Main-shortest path update after W16. The goal was to fix
 The trace-latent BF patch path now uses a three-level margin priority:
 
 ```text
-generation_scores -> latent_logit_lens -> parsed_answer_fallback
+generation_scores_aligned_first_token -> latent_logit_lens -> parsed_answer_fallback
 ```
 
-The new `latent_logit_lens` path takes the final captured `output_last_position_hidden_state`, applies `final_norm` when present, projects through `lm_head`, and computes a continuous source-answer minus target-answer token logit margin. BF-Patch and BF-Swap records now expose `margin_source`, `effective_margin_shift`, and `latent_logit_margin_shift`, while retaining legacy `logprob_margin_shift`.
+The generation-score path no longer reads `scores[-1]` blindly. `score_margin_with_diagnostics()` derives generated token ids from the LVR trace, checks candidate tokenization, finds the first generated source/target candidate token, and uses the matching score index only when that alignment exists. If the score path cannot be used, the record stores clean and patched diagnostics separately with reasons such as `missing_scores`, `empty_scores`, `multi_token_candidate`, `decision_index_mismatch`, `score_generated_length_mismatch`, `bad_score_shape`, and `nonfinite_score`.
+
+The `latent_logit_lens` path takes the final captured `output_last_position_hidden_state`, applies `final_norm` when present, projects through `lm_head`, and computes a continuous source-answer minus target-answer token logit margin. BF-Patch and BF-Swap records now expose `clean_score_diagnostic`, `patched_score_diagnostic`, `score_failure_reasons`, `margin_source`, `effective_margin_shift`, and `latent_logit_margin_shift`, while retaining legacy `logprob_margin_shift`.
 
 Transfer-rate reductions are now CI-ready through per-sample reductions:
 
@@ -30,7 +32,7 @@ tools/validate_trace_margin_quality.py
 tools/validate_main_paper_readiness.py
 ```
 
-`tools/validate_trace_latent_gate.py` now rejects excessive parsed-answer fallback for new patch runs, while `--compat-allow-legacy-margin` remains available for pre-fix artifacts. `tools/merge_main_matrix.py` now copies a representative config snapshot into merged artifacts, preserves trace-light sanity settings, and writes `mixed_effects_summary.json`.
+`tools/validate_trace_latent_gate.py` now rejects excessive parsed-answer fallback for new patch runs, can require generation-score diagnostic summaries, and keeps `--compat-allow-legacy-margin` for pre-diagnostic artifacts. `tools/validate_trace_margin_quality.py` reports score failure reason counts in addition to margin-source provenance. `tools/merge_main_matrix.py` now copies a representative config snapshot into merged artifacts, preserves trace-light sanity settings, and writes `mixed_effects_summary.json`.
 
 ## Evidence Discipline
 
@@ -117,8 +119,9 @@ git diff --check: pass
 validate_trace_latent_gate.py on W16 n=500 legacy margin compatibility: pass
 validate_trace_latent_gate.py on W17 n=1000 light: pass
 validate_main_paper_readiness.py on W17 n=1000 light: pass
+smoke fixture requiring generation-score diagnostics: pass
 ```
 
 ## Boundary
 
-This update does not implement Monet modified-vLLM scheduler-native generation tracing, PF-B DINO alignment, or a full random-effect mixed model. The mixed-effects artifact is a fixed-effect fallback (`value ~ model + task`) intended to make the Main-readiness artifact contract executable; full mixed-effects statistics remain a paper-polish task for the full cross-task matrix.
+This update does not implement full multi-token candidate sequence scoring from generation traces. Multi-token candidates are diagnosed and handled by the latent logit-lens fallback rather than mixed with a non-equivalent teacher-forced scoring path. It also does not implement Monet modified-vLLM scheduler-native generation tracing, PF-B DINO alignment, or a full random-effect mixed model. The mixed-effects artifact is a fixed-effect fallback (`value ~ model + task`) intended to make the Main-readiness artifact contract executable; full mixed-effects statistics remain a paper-polish task for the full cross-task matrix.

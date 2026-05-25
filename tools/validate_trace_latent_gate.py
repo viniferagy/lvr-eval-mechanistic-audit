@@ -27,7 +27,7 @@ TRANSFER_SCALARS = {
     "bf_patch_answer_transfer": "answer_transfer_rate",
     "bf_swap_latent_replacement": "swap_answer_transfer_rate",
 }
-CONTINUOUS_MARGIN_SOURCES = {"generation_scores", "latent_logit_lens"}
+CONTINUOUS_MARGIN_SOURCES = {"generation_scores", "generation_scores_aligned_first_token", "latent_logit_lens"}
 
 
 def fail(msg: str) -> None:
@@ -77,7 +77,21 @@ def _patch_margin_quality(payload: dict) -> dict:
     parsed = 0
     missing = 0
     sources: dict[str, int] = {}
+    diag_records = 0
+    missing_diag_records = 0
+    reason_counts: dict[str, int] = {}
+    clean_ok = 0
+    patched_ok = 0
+    both_ok = 0
     for cell in payload.get("cells") or []:
+        diag = cell.get("generation_score_diagnostics") or {}
+        diag_records += int(diag.get("diagnostic_records") or 0)
+        missing_diag_records += int(diag.get("missing_diagnostic_records") or 0)
+        clean_ok += int(diag.get("clean_generation_scores_ok") or 0)
+        patched_ok += int(diag.get("patched_generation_scores_ok") or 0)
+        both_ok += int(diag.get("both_generation_scores_ok") or 0)
+        for reason, count in (diag.get("generation_score_failure_reason_counts") or {}).items():
+            reason_counts[str(reason)] = reason_counts.get(str(reason), 0) + int(count)
         for record in cell.get("records") or []:
             if record.get("error") is not None:
                 continue
@@ -97,6 +111,12 @@ def _patch_margin_quality(payload: dict) -> dict:
         "missing": missing,
         "parsed_ratio": (float(parsed) / float(total)) if total else 1.0,
         "sources": sources,
+        "diagnostic_records": diag_records,
+        "missing_diagnostic_records": missing_diag_records,
+        "clean_generation_scores_ok": clean_ok,
+        "patched_generation_scores_ok": patched_ok,
+        "both_generation_scores_ok": both_ok,
+        "generation_score_failure_reason_counts": reason_counts,
     }
 
 
@@ -117,6 +137,11 @@ def main(argv: list[str] | None = None) -> None:
         help="Optional explicit trace-latent metric subset to validate, useful for entry smoke runs.",
     )
     ap.add_argument("--max-parsed-fallback-ratio", type=float, default=0.2)
+    ap.add_argument(
+        "--require-score-diagnostics",
+        action="store_true",
+        help="Require generation-score diagnostic summaries on trace-latent patch metrics.",
+    )
     ap.add_argument(
         "--compat-allow-legacy-margin",
         action="store_true",
@@ -180,6 +205,8 @@ def main(argv: list[str] | None = None) -> None:
                     fail(f"{metric_id} margin-quality records too small: {quality['total']} < {args.min_pairs}")
                 if quality["continuous"] <= 0:
                     fail(f"{metric_id} has no continuous margin-source records")
+                if args.require_score_diagnostics and quality["diagnostic_records"] <= 0:
+                    fail(f"{metric_id} missing generation-score diagnostic records")
                 if quality["parsed_ratio"] > args.max_parsed_fallback_ratio:
                     fail(
                         f"{metric_id} parsed fallback ratio too high: "

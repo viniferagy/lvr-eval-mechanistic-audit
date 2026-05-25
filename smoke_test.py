@@ -2157,10 +2157,13 @@ def test_trace_latent_w14_w15_fixtures():
     from pipeline.data import ProbeSample
 
     class TinyTokenizer:
-        vocab = {"original": 1, "modified": 2}
+        vocab = {"original": 1, "modified": 2, "multi": 3, "piece": 4, "other": 5}
 
         def encode(self, text, add_special_tokens=False):
-            return [self.vocab.get(str(text).strip().lower(), 1)]
+            text = str(text).strip().lower()
+            if text == "multi":
+                return [3, 4]
+            return [self.vocab.get(text, 1)]
 
         def decode(self, ids, skip_special_tokens=True):
             inv = {v: k for k, v in self.vocab.items()}
@@ -2190,14 +2193,29 @@ def test_trace_latent_w14_w15_fixtures():
             ]
             include_scores = "with_scores" in str(question)
             scores = None
+            generated_ids = [2 if value > 0 else 1]
             if include_scores:
                 scores = [torch.zeros(1, 4)]
                 scores[-1][0, 1] = -value
                 scores[-1][0, 2] = value
+                if "mismatch" in str(question):
+                    generated_ids = [5]
             generated = "modified" if value > 0 else "original"
             return {
                 "generated_text": generated,
                 "scores": scores,
+                "prompt_len": 0,
+                "generated_ids": generated_ids,
+                "decoded_generated_tokens": [wrapper.processor.tokenizer.decode([token_id]) for token_id in generated_ids],
+                "score_token_alignment": [
+                    {
+                        "score_index": idx,
+                        "generated_token_index": idx,
+                        "generated_token_id": token_id,
+                        "generated_token_text": wrapper.processor.tokenizer.decode([token_id]),
+                    }
+                    for idx, token_id in enumerate(generated_ids[: len(scores or [])])
+                ],
                 "trace_quality": "instrumented_sparse_v0",
                 "missing_modules": [],
                 "trace_v2_error": None,
@@ -2267,11 +2285,66 @@ def test_trace_latent_w14_w15_fixtures():
         "cf_stage": {"families": {"mask": [0.4]}},
     }
     assert TL.enabled(cfg, "pf_a_corruption_selectivity")
+    aligned_trace = wrapper.adapter.generate_with_trace(
+        wrapper,
+        sample.counterfactual_image,
+        "with_scores",
+        trace_capture={"capture_tensors": True},
+    )
+    aligned_diag = TL.score_margin_with_diagnostics(
+        aligned_trace,
+        wrapper,
+        "modified",
+        "original",
+        label="aligned",
+    )
+    assert aligned_diag["status"] == "pass"
+    assert aligned_diag["source"] == "generation_scores_aligned_first_token"
+    assert aligned_diag["used_score_index"] == 0
+
+    mismatch_trace = wrapper.adapter.generate_with_trace(
+        wrapper,
+        sample.counterfactual_image,
+        "with_scores mismatch",
+        trace_capture={"capture_tensors": True},
+    )
+    mismatch_diag = TL.score_margin_with_diagnostics(
+        mismatch_trace,
+        wrapper,
+        "modified",
+        "original",
+        label="mismatch",
+    )
+    assert mismatch_diag["status"] == "fail"
+    assert mismatch_diag["reason"] == "decision_index_mismatch"
+
+    multi_diag = TL.score_margin_with_diagnostics(
+        aligned_trace,
+        wrapper,
+        "multi",
+        "original",
+        label="multi",
+    )
+    assert multi_diag["status"] == "fail"
+    assert multi_diag["reason"] == "multi_token_candidate"
+
+    missing_scores_diag = TL.score_margin_with_diagnostics(
+        wrapper.adapter.generate_with_trace(wrapper, sample.image, "no scores"),
+        wrapper,
+        "modified",
+        "original",
+        label="missing_scores",
+    )
+    assert missing_scores_diag["status"] == "fail"
+    assert missing_scores_diag["reason"] == "missing_scores"
+
     patch_rec = TL.patch_pair(wrapper, sample, cfg)
     assert patch_rec["answer_transferred"] is True
     assert patch_rec["logprob_margin_shift"] is not None
     assert patch_rec["margin_source"] == "latent_logit_lens"
     assert patch_rec["latent_logit_margin_shift"] is not None
+    assert patch_rec["clean_score_diagnostic"]["reason"] == "missing_scores"
+    assert patch_rec["patched_score_diagnostic"]["reason"] == "missing_scores"
 
     payloads = {
         "pf_a_corruption_selectivity": run_pf_a_metric(wrapper, [sample], cfg, "lvr_7b"),
@@ -2297,6 +2370,10 @@ def test_trace_latent_w14_w15_fixtures():
 
     for metric_id, payload in payloads.items():
         assert (payload.get("config") or {}).get("trace_latent") is True, metric_id
+        if metric_id in {"bf_patch_answer_transfer", "bf_swap_latent_replacement"}:
+            diag = payload["cells"][0]["generation_score_diagnostics"]
+            assert diag["diagnostic_records"] >= 1
+            assert diag["generation_score_failure_reason_counts"]
         reports = run_sanity_for_metric_result(metric_id, payload, cfg)
         assert reports and not has_failed_checks(reports), metric_id
 
@@ -2321,7 +2398,7 @@ def test_trace_latent_w14_w15_fixtures():
     save_sanity_reports(sanity, str(run_dir))
     run_analysis({}, {}, str(run_dir), metric_results=metric_results)
     validate_trace_latent_gate_main([str(run_dir), "--min-pairs", "1", "--min-samples", "1"])
-    validate_trace_margin_quality_main([str(run_dir), "--min-records", "1"])
+    validate_trace_margin_quality_main([str(run_dir), "--min-records", "1", "--require-score-diagnostics"])
 
     bad_dir = Path(tempfile.mkdtemp(prefix="trace_latent_bad_margin_"))
     (bad_dir / "metrics").mkdir()

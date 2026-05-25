@@ -401,6 +401,33 @@ class LVRQwenAdapter(QwenVLAdapter):
             skip_special_tokens=False,
             clean_up_tokenization_spaces=False,
         )[0]
+        generated_ids = [int(token_id) for token_id in new_ids.detach().cpu().tolist()]
+        decoded_generated_tokens = []
+        for token_id in generated_ids:
+            try:
+                token_text = wrapper.processor.tokenizer.decode(
+                    [int(token_id)],
+                    skip_special_tokens=False,
+                    clean_up_tokenization_spaces=False,
+                )
+            except TypeError:
+                token_text = wrapper.processor.tokenizer.decode([int(token_id)])
+            decoded_generated_tokens.append(token_text)
+        scores = getattr(gen, "scores", None)
+        score_token_alignment = []
+        if scores is not None:
+            for idx in range(len(scores)):
+                token_id = generated_ids[idx] if idx < len(generated_ids) else None
+                score_token_alignment.append({
+                    "score_index": int(idx),
+                    "generated_token_index": int(idx) if token_id is not None else None,
+                    "generated_token_id": token_id,
+                    "generated_token_text": (
+                        decoded_generated_tokens[idx]
+                        if idx < len(decoded_generated_tokens)
+                        else None
+                    ),
+                })
 
         lvr_start_id = int(wrapper.model.config.lvr_start_id)
         lvr_id = int(wrapper.model.config.lvr_id)
@@ -421,10 +448,14 @@ class LVRQwenAdapter(QwenVLAdapter):
             "inputs": inputs,
             "prompt_spans": spans,
             "sequences": gen.sequences,
+            "prompt_len": int(prompt_len),
+            "generated_ids": generated_ids,
+            "decoded_generated_tokens": decoded_generated_tokens,
+            "score_token_alignment": score_token_alignment,
             "generated_text": text_out,
             "attentions": getattr(gen, "attentions", None),
             "hidden_states": getattr(gen, "hidden_states", None),
-            "scores": getattr(gen, "scores", None),
+            "scores": scores,
             **lvr_pos_info,
             "trace_quality": "approx_from_generated_token_ids",
             "notes": {

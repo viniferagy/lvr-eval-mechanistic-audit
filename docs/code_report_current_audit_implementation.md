@@ -136,7 +136,9 @@ In trace-latent mode, the intervention site is:
 forward_pre.last_position_hidden_state
 ```
 
-For generation-score margins, the code attempts token-level scoring from generation scores. When scores are unavailable or incomplete, the trace-latent path now falls back to a continuous latent logit-lens margin computed from the final captured hidden-feedback state through `final_norm` and `lm_head`. Only if both continuous paths fail does it use the parsed constrained-answer fallback. Patch records expose `margin_source`, `effective_margin_shift`, and `latent_logit_margin_shift`, and validators can fail runs that rely too heavily on parsed-answer fallback.
+For generation-score margins, the code now uses an aligned diagnostic path rather than the old `scores[-1]` assumption. `score_margin_with_diagnostics()` derives generated token ids from the adapter trace, checks whether the source/target candidates are single-token answers, finds the generated candidate token, and uses the matching score index only when the token-score alignment is explicit. Otherwise it records a machine-readable failure reason such as `missing_scores`, `multi_token_candidate`, `decision_index_mismatch`, `score_generated_length_mismatch`, `bad_score_shape`, or `nonfinite_score`.
+
+When aligned generation scores are unavailable, the trace-latent path falls back to a continuous latent logit-lens margin computed from the final captured hidden-feedback state through `final_norm` and `lm_head`. Only if both continuous paths fail does it use the parsed constrained-answer fallback. Patch records expose `clean_score_diagnostic`, `patched_score_diagnostic`, `score_failure_reasons`, `margin_source`, `clean_margin_source`, `patched_margin_source`, `generation_score_margin_shift`, `effective_margin_shift`, and `latent_logit_margin_shift`. Validators can fail runs that rely too heavily on parsed-answer fallback, and can also require diagnostic summaries for new patch/swap artifacts.
 
 Primary scalar:
 
@@ -268,8 +270,8 @@ This pattern is correct because each child process sees only one physical GPU as
 
 The main validators are:
 
-- `tools/validate_trace_latent_gate.py`: requires all expected trace-latent metrics, `trace_latent=True`, primary scalars, enough instrumented trace records, patch successes for BF metrics, control cells for BF-Swap, CI rows, sanity pass, trace-latent plots, transfer-rate CI rows, and acceptable parsed-fallback margin ratio for new runs.
-- `tools/validate_trace_margin_quality.py`: checks patch metric `margin_source` provenance directly and fails when parsed-answer fallback exceeds the configured threshold.
+- `tools/validate_trace_latent_gate.py`: requires all expected trace-latent metrics, `trace_latent=True`, primary scalars, enough instrumented trace records, patch successes for BF metrics, control cells for BF-Swap, CI rows, sanity pass, trace-latent plots, transfer-rate CI rows, and acceptable parsed-fallback margin ratio for new runs. It can also require generation-score diagnostic summaries with `--require-score-diagnostics`.
+- `tools/validate_trace_margin_quality.py`: checks patch metric `margin_source` provenance directly, reports generation-score failure reason counts, and fails when parsed-answer fallback exceeds the configured threshold.
 - `tools/validate_main_paper_readiness.py`: checks manifest evidence-level discipline, `summary_with_ci.json`, `mixed_effects_summary.json`, and optionally trace margin quality.
 - `tools/validate_main_matrix.py`: checks task/model/metric coverage, sample thresholds, BF pair thresholds, and `summary_with_ci.json`.
 - `tools/validate_monet_latent.py`: checks Monet metric ID/model ID, latent mode path, `vllm_scheduler_native=false`, patch counts, captured state counts, shape matches, prereg lock, sanity pass, and CI rows.
@@ -302,6 +304,7 @@ py_compile: pass
 smoke_test.py: pass
 validate_trace_latent_gate.py on n=500: pass
 validate_trace_latent_gate.py on n=1000 light: pass
+validate_trace_margin_quality.py fixture with score diagnostics: pass
 validate_main_paper_readiness.py on n=1000 light: pass
 validate_main_matrix.py on T1/T2/T3 n=100: pass
 validate_monet_latent.py on W13: pass
