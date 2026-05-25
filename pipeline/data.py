@@ -109,6 +109,14 @@ def load_probe_set(cfg_data: dict) -> list[ProbeSample]:
         from .data_maze import load_maze
 
         samples = load_maze(cfg_data)
+    elif src == "blink":
+        from .data_blink import load_blink
+
+        samples = load_blink(cfg_data)
+    elif src == "vsi":
+        from .data_vsi import load_vsi
+
+        samples = load_vsi(cfg_data)
     else:
         raise ValueError(f"未知 source_type: {src}")
 

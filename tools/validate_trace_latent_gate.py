@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 
-REQUIRED_METRICS = {
+DEFAULT_REQUIRED_METRICS = {
     "pf_a_corruption_selectivity",
     "pf_b_patch_alignment",
     "bf_patch_answer_transfer",
@@ -71,9 +71,34 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("run_dir")
     ap.add_argument("--min-pairs", type=int, default=50)
     ap.add_argument("--min-samples", type=int, default=50)
+    ap.add_argument(
+        "--allow-disabled-metrics",
+        action="store_true",
+        help="Only require metrics enabled in config_snapshot.yaml; used for n=1000 light trace-latent runs.",
+    )
+    ap.add_argument(
+        "--metrics",
+        nargs="+",
+        default=None,
+        help="Optional explicit trace-latent metric subset to validate, useful for entry smoke runs.",
+    )
     args = ap.parse_args(argv)
 
     run_dir = Path(args.run_dir)
+    required_metrics = set(DEFAULT_REQUIRED_METRICS)
+    if args.metrics:
+        required_metrics = {str(metric) for metric in args.metrics}
+    if args.allow_disabled_metrics:
+        config_path = run_dir / "config_snapshot.yaml"
+        if config_path.is_file():
+            import yaml
+
+            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            metrics_cfg = cfg.get("metrics") or {}
+            required_metrics = {
+                metric for metric in DEFAULT_REQUIRED_METRICS
+                if bool((metrics_cfg.get(metric) or {}).get("enabled", True))
+            }
     metrics = _load_metric_files(run_dir)
     by_metric: dict[str, list[dict]] = {}
     for envelope in metrics:
@@ -81,11 +106,11 @@ def main(argv: list[str] | None = None) -> None:
         payload = envelope.get("payload") or {}
         by_metric.setdefault(str(metric_id), []).append(payload)
 
-    missing = REQUIRED_METRICS - set(by_metric)
+    missing = required_metrics - set(by_metric)
     if missing:
         fail(f"missing trace-latent metrics: {sorted(missing)}")
 
-    for metric_id in sorted(REQUIRED_METRICS):
+    for metric_id in sorted(required_metrics):
         payloads = by_metric.get(metric_id) or []
         if len(payloads) != 1:
             fail(f"{metric_id} expected exactly one LVR payload, found {len(payloads)}")
@@ -124,6 +149,8 @@ def main(argv: list[str] | None = None) -> None:
         if int(row.get("n") or 0) > 0
     }
     for metric_id, scalar in PRIMARY_SCALARS.items():
+        if metric_id not in required_metrics:
+            continue
         if (metric_id, "lvr_7b", scalar) not in primary_ci:
             fail(f"summary_with_ci missing primary row: {metric_id}/lvr_7b/{scalar}")
 

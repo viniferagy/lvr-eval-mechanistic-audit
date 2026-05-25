@@ -451,3 +451,37 @@ def check_monet_latent_patch_result(payload: dict, cfg: dict | None = None) -> d
     checks.append(make_check("captured_shape_match", PASS if shape_records >= min_pairs else FAIL,
                              shape_records=shape_records, min_pairs=min_pairs))
     return make_report("monet_latent_patch_answer_transfer", payload.get("model", "unknown"), checks, "w13_monet")
+
+
+def check_output_accuracy_result(payload: dict, cfg: dict | None = None) -> dict:
+    checks = _finite_reduction_checks(payload, ["accuracy"])
+    reduction = payload.get("reduction") or {}
+    min_samples = int((((cfg or {}).get("validation") or {}).get("output_accuracy") or {}).get(
+        "min_samples",
+        _min_samples(cfg),
+    ))
+    n = int(reduction.get("n") or 0)
+    n_error = int(reduction.get("n_error") or 0)
+    max_error_ratio = float((((cfg or {}).get("validation") or {}).get("output_accuracy") or {}).get(
+        "max_error_ratio",
+        _max_error_ratio(cfg),
+    ))
+    checks.append(make_check("min_samples", PASS if n >= min_samples else FAIL, n=n, min_samples=min_samples))
+    checks.append(make_check(
+        "error_ratio",
+        PASS if n_error <= max(1, n) * max_error_ratio else FAIL,
+        n=n,
+        n_error=n_error,
+        max_error_ratio=max_error_ratio,
+    ))
+    prediction_records = 0
+    for record in payload.get("samples") or []:
+        if record.get("error") is None and record.get("prediction") is not None:
+            prediction_records += 1
+    checks.append(make_check(
+        "predictions_recorded",
+        PASS if prediction_records >= min_samples else FAIL,
+        prediction_records=prediction_records,
+        min_samples=min_samples,
+    ))
+    return make_report("output_accuracy_sanity", payload.get("model", "unknown"), checks, "output_accuracy")

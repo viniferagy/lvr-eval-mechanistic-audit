@@ -55,6 +55,7 @@ from pipeline.metrics.v2.monet_latent_patch_answer_transfer import (
     METRIC_ID as MONET_LATENT_METRIC_ID,
     reduce_records as reduce_monet_latent_records,
 )
+from pipeline.metrics.v2.output_accuracy_sanity import run as run_output_accuracy_metric
 from pipeline.metrics.v2.pf_b_patch_alignment import run as run_pf_b_metric
 from pipeline.metrics.v2 import trace_latent as TL
 from pipeline.metrics.lvr_generation_trace import run as run_lvr_trace_metric
@@ -76,8 +77,11 @@ from tools.validate_capacity_sweep import main as validate_capacity_sweep_main
 from tools.build_evidence_pack import main as build_evidence_pack_main
 from tools.build_findings_pack import main as build_findings_pack_main
 from tools.prepare_maze_planning_hf import main as prepare_maze_planning_hf_main
+from tools.prepare_blink_hf import main as prepare_blink_hf_main
+from tools.prepare_vsi_bench_hf import main as prepare_vsi_bench_hf_main
 from tools.prepare_monet_sft_hf import extract_prompt_answer, strip_latent_tokens
 from tools.validate_findings_gate import main as validate_findings_gate_main
+from tools.validate_main_matrix import main as validate_main_matrix_main
 from tools.validate_monet_latent import main as validate_monet_latent_main
 from tools.validate_trace_latent_gate import main as validate_trace_latent_gate_main
 from tools.validate_w3_latent import main as validate_w3_latent_main
@@ -360,6 +364,85 @@ def test_prepare_maze_planning_fixture():
     assert maze[0].task_metadata["steps"] == ["go forward", "turn left", "go forward"]
     assert maze[0].bboxes and len(maze[0].bboxes[0]) == 4
     print("  MazePlanning HF/local converter fixture -> ok")
+
+
+def test_blink_vsi_loaders_and_prepare_fixtures():
+    print("\n== 4d. BLINK / VSI loaders and converters ==")
+    out_dir = Path(tempfile.mkdtemp(prefix="blink_vsi_fixture_"))
+    source = out_dir / "source"
+    source.mkdir()
+    make_img(seed=140).save(source / "blink.png")
+    make_img(seed=141).save(source / "vsi_0.png")
+    make_img(seed=142).save(source / "vsi_1.png")
+
+    blink_raw = source / "blink.json"
+    blink_raw.write_text(json.dumps([
+        {
+            "id": "blink0",
+            "image": "blink.png",
+            "question": "Which object is red?",
+            "choices": {"A": "cube", "B": "sphere"},
+            "answer": "A",
+        }
+    ]), encoding="utf-8")
+    blink_out = out_dir / "blink_prepared"
+    import sys
+
+    old_argv = sys.argv
+    try:
+        sys.argv = [
+            "prepare_blink_hf.py",
+            "--input-json", str(blink_raw),
+            "--image-root", str(source),
+            "--out", str(blink_out),
+            "--max-samples", "1",
+        ]
+        prepare_blink_hf_main()
+    finally:
+        sys.argv = old_argv
+    blink = load_probe_set({
+        "source_type": "blink",
+        "jsonl_path": str(blink_out / "manifest.jsonl"),
+        "image_root": str(blink_out / "images"),
+        "skip_missing_images": False,
+    })
+    assert len(blink) == 1
+    assert "Choices:" in blink[0].question
+    assert blink[0].task_metadata["weak_oracle"] is True
+
+    vsi_raw = source / "vsi.json"
+    vsi_raw.write_text(json.dumps([
+        {
+            "id": "vsi0",
+            "frames": ["vsi_0.png", "vsi_1.png"],
+            "question": "Where did the marker move?",
+            "choices": ["left", "right"],
+            "answer": "right",
+        }
+    ]), encoding="utf-8")
+    vsi_out = out_dir / "vsi_prepared"
+    old_argv = sys.argv
+    try:
+        sys.argv = [
+            "prepare_vsi_bench_hf.py",
+            "--input-json", str(vsi_raw),
+            "--image-root", str(source),
+            "--out", str(vsi_out),
+            "--max-samples", "1",
+        ]
+        prepare_vsi_bench_hf_main()
+    finally:
+        sys.argv = old_argv
+    vsi = load_probe_set({
+        "source_type": "vsi",
+        "jsonl_path": str(vsi_out / "manifest.jsonl"),
+        "image_root": str(vsi_out / "images"),
+        "skip_missing_images": False,
+    })
+    assert len(vsi) == 1
+    assert vsi[0].image.size[0] >= 256
+    assert "Choices:" in vsi[0].question
+    print("  BLINK/VSI prepare tools and loaders -> ok")
 
 
 def test_image_resize_metadata():
@@ -2209,6 +2292,117 @@ def test_trace_latent_w14_w15_fixtures():
     print("  trace-latent metrics, sanity, validator, and plots -> ok")
 
 
+def test_output_accuracy_and_main_matrix_fixtures():
+    print("\n== 10o. Output accuracy + main-matrix tooling fixtures ==")
+    from pipeline.data import ProbeSample
+
+    class TinyAccuracyWrapper:
+        def generate(self, images, prompts, max_new_tokens=64):
+            return ["The answer is right." for _ in prompts]
+
+    sample = ProbeSample(
+        id="acc0",
+        image=Image.new("RGB", (8, 8), "white"),
+        question="Where?",
+        answer="right",
+        paired_id="acc0",
+        source_dataset="vsi_bench",
+    )
+    cfg = {
+        "output_accuracy": {"batch_size": 1, "max_new_tokens": 8},
+        "validation": {"output_accuracy": {"min_samples": 1}},
+    }
+    payload = run_output_accuracy_metric(TinyAccuracyWrapper(), [sample], cfg, "qwen2_5_vl_3b")
+    assert payload["reduction"]["accuracy"] == 1.0
+    reports = run_sanity_for_metric_result("output_accuracy_sanity", payload, cfg)
+    assert reports and not has_failed_checks(reports)
+
+    run_root = Path(tempfile.mkdtemp(prefix="main_matrix_fixture_"))
+    task_metrics = {
+        "spd_faith": [
+            "pf_a_corruption_selectivity",
+            "pf_b_patch_alignment",
+            "bf_patch_answer_transfer",
+            "bf_swap_latent_replacement",
+            "bf_conf_calibrated_progression",
+            "cf_stage_decay",
+        ],
+        "maze": [
+            "pf_a_corruption_selectivity",
+            "pf_b_patch_alignment",
+            "bf_conf_calibrated_progression",
+            "cf_stage_decay",
+        ],
+        "blink": [
+            "pf_a_corruption_selectivity",
+            "pf_b_patch_alignment",
+            "bf_conf_calibrated_progression",
+            "cf_stage_decay",
+        ],
+    }
+    models = ["qwen2_5_vl_3b", "qwen2_5_vl_7b", "lvr_7b"]
+    metric_results = []
+    for task, metrics in task_metrics.items():
+        for model in models:
+            run_dir = run_root / f"{task}_{model}"
+            (run_dir / "metrics").mkdir(parents=True)
+            (run_dir / "config_snapshot.yaml").write_text(
+                yaml.safe_dump({"data": {"source_type": task}}),
+                encoding="utf-8",
+            )
+            for metric_id in metrics:
+                if metric_id == "bf_patch_answer_transfer":
+                    p = {"model": model, "task": task, "n_paired": 3, "cells": [], "samples": [{"id": "a", "paired_id": "a", "reduction": {"logprob_margin_shift": 0.1}}], "reduction": {"logprob_margin_shift": 0.1, "n_paired": 3}}
+                elif metric_id == "bf_swap_latent_replacement":
+                    p = {"model": model, "task": task, "n_paired": 3, "cells": [], "control_cells": [], "samples": [{"id": "a", "paired_id": "a", "reduction": {"swap_margin_shift": 0.1}}], "reduction": {"swap_margin_shift": 0.1, "n_paired": 3}}
+                else:
+                    scalar = {
+                        "pf_a_corruption_selectivity": "selectivity",
+                        "pf_b_patch_alignment": "native_alignment",
+                        "bf_conf_calibrated_progression": "gold_logit_slope",
+                        "cf_stage_decay": "late_delta",
+                    }[metric_id]
+                    p = {"model": model, "task": task, "samples": [{"id": str(i), "reduction": {scalar: 0.1}} for i in range(3)], "reduction": {scalar: 0.1, "n": 3}}
+                env = make_metric_result(metric_id, model, p)
+                metric_results.append(env)
+                (run_dir / "metrics" / f"{metric_id}_{model}.json").write_text(
+                    json.dumps(env, indent=2),
+                    encoding="utf-8",
+                )
+    merged = run_root / "merged"
+    merged.mkdir()
+    (merged / "summary_with_ci.json").write_text(
+        json.dumps(build_summary_with_ci(metric_results), indent=2),
+        encoding="utf-8",
+    )
+    validate_main_matrix_main([
+        str(run_root),
+        "--tasks", "maze,spd_faith,blink",
+        "--models", ",".join(models),
+        "--min-samples", "3",
+        "--bf-min-pairs", "3",
+    ])
+
+    acc_root = Path(tempfile.mkdtemp(prefix="accuracy_matrix_fixture_"))
+    acc_run = acc_root / "vsi_qwen2_5_vl_3b"
+    (acc_run / "metrics").mkdir(parents=True)
+    (acc_run / "config_snapshot.yaml").write_text(yaml.safe_dump({"data": {"source_type": "vsi"}}), encoding="utf-8")
+    acc_env = make_metric_result("output_accuracy_sanity", "qwen2_5_vl_3b", payload)
+    (acc_run / "metrics" / "output_accuracy_sanity_qwen2_5_vl_3b.json").write_text(
+        json.dumps(acc_env, indent=2),
+        encoding="utf-8",
+    )
+    validate_main_matrix_main([str(acc_root), "--accuracy-only", "--min-samples", "1"])
+
+    dry = os.popen(
+        "bash tools/launch_main_matrix.sh --configs config.main_maze_n1000.yaml "
+        "--models qwen2_5_vl_3b --metrics pf_a_corruption_selectivity "
+        "--gpus 0 --run-root /tmp/lvr_matrix_dry --dry-run"
+    ).read()
+    assert "CUDA_VISIBLE_DEVICES=0" in dry and "run_all.py" in dry
+    print("  output accuracy, matrix validator, and launch dry-run -> ok")
+
+
 def test_bf1_does_not_cache_gpu_inputs_static():
     print("\n== 11. BF-1 targeted cache policy ==")
     import inspect
@@ -2303,6 +2497,7 @@ def main():
     test_data_field_mapping()
     test_spd_faith_and_maze_loaders()
     test_prepare_maze_planning_fixture()
+    test_blink_vsi_loaders_and_prepare_fixtures()
     test_image_resize_metadata()
     test_pf3_corrupt_after_resize()
     test_lvr_json_loader()
@@ -2329,6 +2524,7 @@ def main():
     test_monet_latent_gate_wiring()
     test_validate_monet_latent_fixture()
     test_trace_latent_w14_w15_fixtures()
+    test_output_accuracy_and_main_matrix_fixtures()
     test_bf1_does_not_cache_gpu_inputs_static()
     test_end_to_end()
     print("\nSMOKE TEST PASSED ✅")

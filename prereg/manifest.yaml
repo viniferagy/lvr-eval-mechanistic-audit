@@ -182,3 +182,32 @@ gates:
       - "late_delta"
     status: "completed_trace_latent_gate"
     boundary: "LVR-only generation-time hidden-feedback metric upgrade at n=50; not Monet scheduler-native trace and not full Main-scale matrix"
+  - gate_id: "W16_lvr_trace_latent_scale_plan"
+    model: "lvr_7b"
+    public_data: "Jackson-Lv/SPD-Faith-Bench"
+    adapter_arch: "lvr_qwen2_5_vl_traced"
+    configs:
+      - "config.lvr_trace_latent.spd_n500.yaml"
+      - "config.lvr_trace_latent.spd_n1000_light.yaml"
+    sample_budgets:
+      all_primary_metrics: 500
+      light_metrics: 1000
+    status: "implemented_pending_full_gpu_run"
+    boundary: "scale-up configs and validators are implemented; full GPU artifacts are generated separately"
+  - gate_id: "W16_t1_t2_t3_main_matrix_plan"
+    configs:
+      - "config.main_maze_n1000.yaml"
+      - "config.main_spd_n1000.yaml"
+      - "config.main_blink_n1000.yaml"
+      - "config.main_vsi_accuracy.yaml"
+    tasks:
+      - "T1 MazePlanning"
+      - "T2 SPD-Faith"
+      - "T3 BLINK"
+      - "T4 VSI-Bench accuracy sanity"
+    models:
+      - "qwen2_5_vl_3b"
+      - "qwen2_5_vl_7b"
+      - "lvr_7b"
+    status: "implemented_pending_full_gpu_run"
+    boundary: "T4 is output accuracy sanity only; BLINK PF/PF-B may use weak-oracle center fallback when bbox metadata is absent"

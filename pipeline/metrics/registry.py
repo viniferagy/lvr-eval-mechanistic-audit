@@ -50,6 +50,9 @@ _ALIASES.update({
     "lvr_latent_patch": "lvr_latent_patch_answer_transfer",
     "latent_patch": "lvr_latent_patch_answer_transfer",
     "monet_latent_patch": "monet_latent_patch_answer_transfer",
+    "output_accuracy": "output_accuracy_sanity",
+    "accuracy_sanity": "output_accuracy_sanity",
+    "output_acc": "output_accuracy_sanity",
 })
 
 

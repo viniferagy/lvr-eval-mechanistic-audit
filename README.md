@@ -47,6 +47,12 @@ lvr-eval-mechanistic-audit/
 ├── config.monet.preflight.yaml
 ├── config.monet_latent_patch.range.yaml
 ├── config.lvr_trace_latent.w14_w15.yaml
+├── config.lvr_trace_latent.spd_n500.yaml
+├── config.lvr_trace_latent.spd_n1000_light.yaml
+├── config.main_spd_n1000.yaml
+├── config.main_maze_n1000.yaml
+├── config.main_blink_n1000.yaml
+├── config.main_vsi_accuracy.yaml
 ├── config.lvr_latent_patch.range.yaml
 ├── config.lvr_latent_patch.stepsweep.yaml
 ├── config.lvr_latent_patch.stepsweep_s2.yaml
@@ -61,6 +67,8 @@ lvr-eval-mechanistic-audit/
 ├── tools/
 │   ├── prepare_spd_faith_hf.py
 │   ├── prepare_maze_planning_hf.py
+│   ├── prepare_blink_hf.py
+│   ├── prepare_vsi_bench_hf.py
 │   ├── prepare_monet_sft_hf.py
 │   ├── validate_spd_range.py
 │   ├── validate_capacity_sweep.py
@@ -68,6 +76,9 @@ lvr-eval-mechanistic-audit/
 │   ├── validate_w4_stepsweep.py
 │   ├── validate_monet_latent.py
 │   ├── validate_trace_latent_gate.py
+│   ├── validate_main_matrix.py
+│   ├── launch_main_matrix.sh
+│   ├── merge_main_matrix.py
 │   ├── build_evidence_pack.py
 │   ├── build_findings_pack.py
 │   ├── check_monet_env.py
@@ -83,6 +94,7 @@ lvr-eval-mechanistic-audit/
 │   ├── validation_report_w4.md
 │   ├── validation_report_w5_w8.md
 │   ├── validation_report_w14_w15_trace_latent.md
+│   ├── validation_report_w16_main_matrix.md
 │   ├── findings_validation_report.md
 │   ├── evidence_pack_w5_w8.md
 │   └── findings_evidence_pack.md
@@ -107,6 +119,7 @@ lvr-eval-mechanistic-audit/
     │   │   ├── cf_stage_decay.py
     │   │   ├── lvr_latent_patch_answer_transfer.py
     │   │   ├── monet_latent_patch_answer_transfer.py
+    │   │   ├── output_accuracy_sanity.py
     │   │   └── trace_latent.py
     │   ├── bf3_confidence_progression.py
     │   ├── pf3_attention_distance.py
@@ -189,6 +202,10 @@ W2 v2 metrics are validated as runnable-v0 gates. They are not yet full paper-gr
 
    `trace_latent.enabled=true` switches the six v2 primary metrics onto real LVR generation-time hidden-feedback states captured by `lvr_qwen2_5_vl_traced`. This path preserves the original metric IDs but changes the audit object from query spans to captured `output_last_position_hidden_state` tensors. Local run: `runs/w14_w15_lvr_trace_latent_n50_v2`, `n=50`, sanity pass, 20 CI rows, 32 trace-latent plots, and `TRACE LATENT GATE VALIDATION PASSED`.
 
+9. **W16 scale-up and T1-T4 matrix tooling**
+
+   W16 adds configs and tooling for LVR trace-latent scale-up (`n=500` all six metrics, `n=1000` light metrics), T1/T2/T3 main matrices over Maze/SPD/BLINK, and T4 VSI-Bench output accuracy sanity. The new `output_accuracy_sanity` metric is intentionally not causal evidence; it is an external task-performance check.
+
 ## Data Sources
 
 Supported `data.source_type` values include:
@@ -198,8 +215,12 @@ Supported `data.source_type` values include:
 - `lvr_json`
 - `spd_faith`
 - `maze`
+- `blink`
+- `vsi`
 
 `spd_faith` is the paired counterfactual entry point used for the W2 range gate. It expects fields for clean/counterfactual images, clean/counterfactual answers, `paired_id`, and either bbox or region-mask oracle metadata.
+
+`blink` is the W16 fine-grained perception task. If no region metadata is present, PF-A/PF-B use center fallback and the run must be interpreted as weak-oracle diagnostic evidence. `vsi` is reserved for output accuracy sanity, usually with static frame-grid images.
 
 Check the local LVR model and external `VincentLeebang/lvr` checkout without loading model weights:
 
@@ -237,6 +258,22 @@ Prepare the canonical local MazePlanning manifest from the public Latent Sketchp
 ./venv/bin/python tools/prepare_maze_planning_hf.py \
   --out data/maze_planning
 ```
+
+Prepare BLINK and VSI-Bench manifests:
+
+```bash
+./venv/bin/python tools/prepare_blink_hf.py \
+  --configs all \
+  --split val \
+  --out data/blink
+
+./venv/bin/python tools/prepare_vsi_bench_hf.py \
+  --split test \
+  --image-root /path/to/local/vsi/frame_grids \
+  --out data/vsi_bench
+```
+
+BLINK is a multi-config Hugging Face dataset; `--configs all` concatenates the official configs. VSI-Bench's public HF table provides question and scene metadata, so the converter needs a local image/frame-grid root to write runnable visual samples.
 
 For a tiny conversion smoke:
 
@@ -333,6 +370,63 @@ Recorded W14-W15 primary results:
 | CF-Stage | `late_delta` | -4.046318 | [-5.252559, -2.870815] |
 
 The W14-W15 validator checks that all six metric payloads are in `trace_latent` mode, that LVR traces have `trace_quality=instrumented_sparse_v0`, that BF patch/swap records applied hidden-feedback patches, that primary CI rows exist, and that trace-latent visualizations were written under `metric_plots/`.
+
+The W16 LVR trace-latent scale gates:
+
+```bash
+bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
+  --config config.lvr_trace_latent.spd_n500.yaml \
+  --models lvr_7b \
+  --only pf_a_corruption_selectivity pf_b_patch_alignment \
+         bf_patch_answer_transfer bf_swap_latent_replacement \
+         bf_conf_calibrated_progression cf_stage_decay \
+  --device cuda:0 \
+  --run-name w16_lvr_trace_latent_spd_n500
+
+./venv/bin/python tools/validate_trace_latent_gate.py \
+  runs/w16_lvr_trace_latent_spd_n500 \
+  --min-pairs 500 \
+  --min-samples 500
+
+bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
+  --config config.lvr_trace_latent.spd_n1000_light.yaml \
+  --models lvr_7b \
+  --only pf_a_corruption_selectivity pf_b_patch_alignment \
+         bf_conf_calibrated_progression cf_stage_decay \
+  --device cuda:0 \
+  --run-name w16_lvr_trace_latent_spd_n1000_light
+
+./venv/bin/python tools/validate_trace_latent_gate.py \
+  runs/w16_lvr_trace_latent_spd_n1000_light \
+  --min-pairs 0 \
+  --min-samples 800 \
+  --allow-disabled-metrics
+```
+
+The W16 T1/T2/T3 matrix and T4 accuracy sanity:
+
+```bash
+bash tools/run_and_hold.sh 0,1,2,3 bash tools/launch_main_matrix.sh \
+  --configs config.main_maze_n1000.yaml,config.main_spd_n1000.yaml,config.main_blink_n1000.yaml \
+  --models qwen2_5_vl_3b,qwen2_5_vl_7b,lvr_7b \
+  --metrics all \
+  --gpus 0,1,2,3 \
+  --run-root runs/w16_main_matrix_t1_t2_t3
+
+./venv/bin/python tools/merge_main_matrix.py runs/w16_main_matrix_t1_t2_t3
+./venv/bin/python tools/validate_main_matrix.py \
+  runs/w16_main_matrix_t1_t2_t3 \
+  --tasks maze,spd_faith,blink \
+  --min-samples 800 \
+  --bf-min-pairs 300
+
+bash tools/run_and_hold.sh 0,1,2,3 bash tools/launch_main_matrix.sh \
+  --configs config.main_vsi_accuracy.yaml \
+  --models qwen2_5_vl_3b,qwen2_5_vl_7b,lvr_7b,monet_7b \
+  --metrics output_accuracy_sanity \
+  --gpus 0,1,2,3 \
+  --run-root runs/w16_vsi_accuracy_sanity
+```
 
 ## Trace v2
 
@@ -600,5 +694,8 @@ Legacy artifacts without group keys keep the old one-sample bootstrap fallback.
 - W14-W15 closes the LVR-side six-primary-metric trace path at gate scale: PF-A/PF-B/BF-Patch/BF-Swap/BF-Conf/CF-Stage can all run on captured LVR generation-time hidden-feedback states when `trace_latent.enabled=true`.
 - W14-W15 is still `n=50` LVR/SPD-Faith gate evidence, not a Main-scale cross-task/cross-model matrix.
 - In W14-W15 BF-Patch/BF-Swap, LVR generation scores can be unavailable for constrained answer-token margins; those rows record a parsed-answer margin fallback while still measuring generated answer transfer and hidden-feedback patch application from the traced generation loop.
+- W16 configs and matrix tooling are implemented for `n=500`/`n=1000` scale-up, but full GPU results are separate artifacts and should be validated before being claimed as completed evidence.
+- BLINK PF-A/PF-B can be weak-oracle diagnostics when BLINK records do not include bboxes or masks.
+- VSI-Bench is output accuracy sanity only in W16, not a causal audit task.
 - PF-B remains native attention-proxy alignment in the current delivered runs; DINOv3 alignment is still future work.
 - Broader tasks, larger sample sizes, modified-vLLM Monet tracing, DINO alignment, and layer-level localization remain future work.

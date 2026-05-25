@@ -1,0 +1,111 @@
+models:
+  lvr_7b:
+    name: "LVR-7B"
+    path: "./models/LVR-7B"
+    arch: "lvr_qwen2_5_vl_traced"
+    lvr_source_path: "../lvr"
+    layer_path: null
+    image_pad_token: "<|image_pad|>"
+    lvr_start_token: "<|lvr_start|>"
+    lvr_token: "<|lvr|>"
+    lvr_latent_end_token: "<|lvr_latent_end|>"
+    lvr_end_token: "<|lvr_end|>"
+runtime:
+  lvr_wait_timeout_minutes: 120
+audit:
+  mode: "generation_trace"
+  query_target: "auto"
+  lvr_expansion_mode: "fixed"
+  lvr_num_tokens: 16
+  lvr_include_latent_end_token: false
+  allow_lvr_fallback_to_answer_probe: false
+  allow_synthetic_lvr_assistant: false
+  allow_multiple_lvr_placeholders: false
+  lvr_decoding_strategy: "steps"
+  lvr_steps: 8
+  max_image_side: 384
+  max_image_pixels: 147456
+data:
+  source_type: "spd_faith"
+  jsonl_path: "./data/spd_faith_hf/manifest.jsonl"
+  image_root: "./data/spd_faith_hf/images"
+  skip_missing_images: false
+  require_region_or_bbox: true
+  max_samples: 1000
+  shuffle_seed: 260720
+  field_map:
+    id: ["id"]
+    paired_id: ["paired_id"]
+    image: ["image_clean"]
+    counterfactual_image: ["image_counterfactual"]
+    question: ["question"]
+    answer: ["gold_answer_clean", "answer"]
+    counterfactual_answer: ["gold_answer_counterfactual", "counterfactual_answer"]
+    rationale: ["rationale"]
+    region_mask: ["region_mask"]
+    bboxes: ["bboxes"]
+preregistration:
+  enabled: true
+  manifest_path: "prereg/manifest.yaml"
+inference:
+  dtype: "bfloat16"
+  device: "cuda:0"
+metrics:
+  pf_a_corruption_selectivity:
+    enabled: true
+  pf_b_patch_alignment:
+    enabled: true
+  bf_patch_answer_transfer:
+    enabled: false
+  bf_swap_latent_replacement:
+    enabled: false
+  bf_conf_calibrated_progression:
+    enabled: true
+  cf_stage_decay:
+    enabled: true
+trace_v2:
+  required: true
+  forbid_fallback: true
+trace_latent:
+  enabled: true
+  required: true
+  forbid_fallback: true
+  apply_to:
+    - "pf_a_corruption_selectivity"
+    - "pf_b_patch_alignment"
+    - "bf_conf_calibrated_progression"
+    - "cf_stage_decay"
+  readout_steps: ["all"]
+  patch_shape_policy: "strict"
+  decoding_strategy: "steps"
+  lvr_steps: 8
+  max_new_tokens: 96
+  max_captured_tensors: 12
+  distance: "l2"
+pf_a:
+  seed: 260720
+  severity: 1.0
+pf_b:
+  seed: 260720
+  severity: 1.0
+  use_dino: false
+bf_conf:
+  text_only_control: false
+cf_stage:
+  readout: "trace_latent"
+  max_samples: 1000
+  families:
+    mask: [0.4, 0.8]
+validation:
+  run_sanity: true
+  fail_fast: true
+  bf3:
+    min_layers: 2
+  v2:
+    min_samples: 800
+    min_pairs: 0
+    max_error_ratio: 0.2
+    allow_center_fallback: false
+output:
+  root: "./runs"
+  run_name: null

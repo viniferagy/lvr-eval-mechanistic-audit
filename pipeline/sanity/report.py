@@ -19,6 +19,7 @@ from .v2 import (
     check_cf_stage_result,
     check_lvr_latent_patch_result,
     check_monet_latent_patch_result,
+    check_output_accuracy_result,
     check_pf_a_result,
     check_pf_b_result,
     check_trace_v2_result,
@@ -111,6 +112,8 @@ def run_sanity_for_metric_result(metric_id: str, result: dict,
         return [check_lvr_latent_patch_result(result, cfg)]
     if metric_id == "monet_latent_patch_answer_transfer":
         return [check_monet_latent_patch_result(result, cfg)]
+    if metric_id == "output_accuracy_sanity":
+        return [check_output_accuracy_result(result, cfg)]
     return []
 
 

@@ -1,0 +1,69 @@
+models:
+  qwen2_5_vl_7b:
+    name: "Qwen2.5-VL-7B"
+    path: "./models/Qwen/Qwen2___5-VL-7B-Instruct"
+    arch: "qwen2_5_vl"
+    layer_path: null
+    image_pad_token: "<|image_pad|>"
+  qwen2_5_vl_3b:
+    name: "Qwen2.5-VL-3B"
+    path: "./models/Qwen/Qwen2___5-VL-3B-Instruct"
+    arch: "qwen2_5_vl"
+    layer_path: null
+    image_pad_token: "<|image_pad|>"
+  lvr_7b:
+    name: "LVR-7B"
+    path: "./models/LVR-7B"
+    arch: "lvr_qwen2_5_vl"
+    lvr_source_path: "../lvr"
+    layer_path: null
+    image_pad_token: "<|image_pad|>"
+    lvr_start_token: "<|lvr_start|>"
+    lvr_token: "<|lvr|>"
+    lvr_latent_end_token: "<|lvr_latent_end|>"
+    lvr_end_token: "<|lvr_end|>"
+  monet_7b:
+    name: "Monet-7B"
+    path: "./models/Monet-7B"
+    arch: "monet_qwen2_5_vl"
+    monet_source_path: "../Monet"
+    layer_path: null
+    image_pad_token: "<|image_pad|>"
+runtime:
+  lvr_wait_timeout_minutes: 120
+audit:
+  mode: "standard_forward"
+  query_target: "auto"
+  max_image_side: 384
+  max_image_pixels: 147456
+data:
+  source_type: "vsi"
+  jsonl_path: "./data/vsi_bench/manifest.jsonl"
+  image_root: "./data/vsi_bench/images"
+  skip_missing_images: false
+  max_samples: 1000
+  shuffle_seed: 260721
+preregistration:
+  enabled: true
+  manifest_path: "prereg/manifest.yaml"
+inference:
+  dtype: "bfloat16"
+  device: "cuda:0"
+metrics:
+  output_accuracy_sanity:
+    enabled: true
+output_accuracy:
+  batch_size: 1
+  max_new_tokens: 64
+validation:
+  run_sanity: true
+  fail_fast: true
+  v2:
+    min_samples: 200
+    max_error_ratio: 0.2
+  output_accuracy:
+    min_samples: 200
+    max_error_ratio: 0.2
+output:
+  root: "./runs"
+  run_name: null
