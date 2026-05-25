@@ -6,10 +6,10 @@ Date: 2026-05-25
 
 This report records the W16 implementation state for scaling from gate-level evidence toward the Main-track audit matrix. It adds reusable configs, data loaders, output-accuracy sanity, matrix sharding, merge, and validation tooling.
 
-Full `n=500` / `n=1000` GPU results remain the Main-track target. On
-2026-05-25, a real hundred-scale checkpoint was run to verify the full W16
-path end to end: LVR trace-latent SPD `n=100` and T1/T2/T3 main matrix
-`n=100`.
+The LVR trace-latent six-metric `n=500` scale gate is now complete. The
+remaining scale target is the `n=1000` light trace-latent gate. On 2026-05-25,
+a real hundred-scale checkpoint was also run to verify the full W16 path end to
+end: LVR trace-latent SPD `n=100` and T1/T2/T3 main matrix `n=100`.
 
 ## Configs
 
@@ -148,6 +148,55 @@ VSI-Bench: public HF question table verified, but local scene/frame-grid images 
 ```
 
 ## Recorded Hundred-Scale Runs
+
+## Recorded LVR Trace-Latent n=500 Scale Gate
+
+LVR trace-latent SPD `n=500`, sharded by metric across four GPUs through
+`tools/run_and_hold.sh`:
+
+```bash
+bash tools/run_and_hold.sh 0,1,2,3 bash tools/launch_main_matrix.sh \
+  --configs config.lvr_trace_latent.spd_n500.yaml \
+  --models lvr_7b \
+  --metrics 'pf_a_corruption_selectivity|pf_b_patch_alignment|bf_patch_answer_transfer|bf_swap_latent_replacement|bf_conf_calibrated_progression|cf_stage_decay' \
+  --gpus 0,1,2,3 \
+  --run-root runs/w16_lvr_trace_latent_spd_n500_sharded
+
+./venv/bin/python tools/merge_main_matrix.py \
+  runs/w16_lvr_trace_latent_spd_n500_sharded
+
+./venv/bin/python tools/validate_trace_latent_gate.py \
+  runs/w16_lvr_trace_latent_spd_n500_sharded/merged \
+  --min-pairs 500 \
+  --min-samples 500
+```
+
+Validation result:
+
+```text
+TRACE LATENT GATE VALIDATION PASSED
+sanity: 6/6 pass
+summary_with_ci rows: 20
+```
+
+Primary LVR trace-latent SPD `n=500` results:
+
+| Metric | n | value | 95% bootstrap CI |
+|---|---:|---:|---:|
+| PF-A selectivity | 500 | -0.044502 | [-0.054109, -0.035044] |
+| PF-B native_alignment | 500 | 0.842298 | [0.835494, 0.848849] |
+| BF-Patch logprob_margin_shift | 500 | -0.004000 | [-0.040000, 0.032000] |
+| BF-Patch answer_transfer_rate | 500 | 0.462000 | not bootstrapped in current secondary summary |
+| BF-Swap swap_margin_shift | 500 | -0.012000 | [-0.048000, 0.024000] |
+| BF-Swap swap_answer_transfer_rate | 500 | 0.462000 | not bootstrapped in current secondary summary |
+| BF-Conf gold_logit_slope | 500 | 0.150825 | [0.134188, 0.167482] |
+| CF-Stage late_delta | 500 | -3.372306 | [-3.852121, -2.902451] |
+
+Trace-latent n=500 visualization:
+
+```text
+runs/w16_lvr_trace_latent_spd_n500_sharded/merged/metric_plots/w16_trace_latent_n500_primary_heatmap.png
+```
 
 LVR trace-latent SPD `n=100`, sharded across four GPUs through
 `tools/run_and_hold.sh`:

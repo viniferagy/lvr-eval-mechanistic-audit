@@ -7,9 +7,9 @@
 This repository is currently at:
 
 ```text
-Engineering stage: W16 hundred-scale LVR trace-latent + T1/T2/T3 matrix smoke passed
-Scientific stage: Findings gate passed; true LVR hidden-feedback intervention, SPD/Maze evidence, Monet Transformers latent-mode range evidence, LVR real-trace versions of all six v2 primary metrics, and hundred-scale T1/T2/T3 matrix evidence are present
-Main-track next step: scale trace-latent LVR from n=100 to n=500/1000, expand task matrices beyond hundred-scale, and implement Monet modified-vLLM scheduler-native trace adapter
+Engineering stage: W16 LVR trace-latent n=500 scale gate + T1/T2/T3 n=100 matrix passed
+Scientific stage: Findings gate passed; true LVR hidden-feedback intervention, SPD/Maze evidence, Monet Transformers latent-mode range evidence, LVR real-trace versions of all six v2 primary metrics at n=500, and hundred-scale T1/T2/T3 matrix evidence are present
+Main-track next step: run the n=1000 light trace-latent gate, expand task matrices beyond hundred-scale, and implement Monet modified-vLLM scheduler-native trace adapter
 ```
 
 The W2 gate demonstrates that the infrastructure can run end to end on real SPD-Faith paired data and real GPU models. The W3 gate adds true inference-time LVR hidden-feedback patching at `n=50`. W4 localizes which hidden-feedback steps drive that transfer at `n=50`, `lvr_steps=8`. W5 sweeps latent feedback budget, W6 replicates the best-step intervention, W7 scales SPD regression evidence to `n=200`, and W8 packages the evidence for review. These gates are stronger than the original proxy scaffold, but they are still not final paper-scale evidence.
@@ -206,7 +206,7 @@ W2 v2 metrics are validated as runnable-v0 gates. They are not yet full paper-gr
 
    W16 adds configs and tooling for LVR trace-latent scale-up (`n=500` all six metrics, `n=1000` light metrics), T1/T2/T3 main matrices over Maze/SPD/BLINK, and T4 VSI-Bench output accuracy sanity. The new `output_accuracy_sanity` metric is intentionally not causal evidence; it is an external task-performance check.
 
-   A hundred-scale real run was completed on 2026-05-25 to verify the full path before launching the larger matrix. LVR trace-latent SPD `n=100` passed `tools/validate_trace_latent_gate.py` at `runs/w16_lvr_trace_latent_spd_n100_sharded/merged`. The T1/T2/T3 matrix passed `tools/validate_main_matrix.py` with 42 metric rows and 168 CI rows at `runs/w16_main_matrix_t1_t2_t3_n100/merged`. T4 VSI-Bench did not run because the public HF table has scene metadata but no local visual frames/frame grids.
+   The LVR trace-latent SPD `n=500` six-metric scale gate completed on 2026-05-25 and passed `tools/validate_trace_latent_gate.py` at `runs/w16_lvr_trace_latent_spd_n500_sharded/merged`. A hundred-scale real matrix was also completed to verify the full path before launching the larger cross-task matrix: LVR trace-latent SPD `n=100` passed at `runs/w16_lvr_trace_latent_spd_n100_sharded/merged`, and the T1/T2/T3 matrix passed `tools/validate_main_matrix.py` with 42 metric rows and 168 CI rows at `runs/w16_main_matrix_t1_t2_t3_n100/merged`. T4 VSI-Bench did not run because the public HF table has scene metadata but no local visual frames/frame grids.
 
 ## Data Sources
 
@@ -404,6 +404,34 @@ bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
   --min-samples 800 \
   --allow-disabled-metrics
 ```
+
+Recorded W16 LVR trace-latent `n=500` scale result:
+
+```bash
+bash tools/run_and_hold.sh 0,1,2,3 bash tools/launch_main_matrix.sh \
+  --configs config.lvr_trace_latent.spd_n500.yaml \
+  --models lvr_7b \
+  --metrics 'pf_a_corruption_selectivity|pf_b_patch_alignment|bf_patch_answer_transfer|bf_swap_latent_replacement|bf_conf_calibrated_progression|cf_stage_decay' \
+  --gpus 0,1,2,3 \
+  --run-root runs/w16_lvr_trace_latent_spd_n500_sharded
+
+./venv/bin/python tools/merge_main_matrix.py runs/w16_lvr_trace_latent_spd_n500_sharded
+./venv/bin/python tools/validate_trace_latent_gate.py \
+  runs/w16_lvr_trace_latent_spd_n500_sharded/merged \
+  --min-pairs 500 \
+  --min-samples 500
+```
+
+| metric | scalar | n | value | 95% bootstrap CI |
+|---|---|---:|---:|---:|
+| PF-A | `selectivity` | 500 | -0.044502 | [-0.054109, -0.035044] |
+| PF-B | `native_alignment` | 500 | 0.842298 | [0.835494, 0.848849] |
+| BF-Patch | `logprob_margin_shift` | 500 | -0.004000 | [-0.040000, 0.032000] |
+| BF-Swap | `swap_margin_shift` | 500 | -0.012000 | [-0.048000, 0.024000] |
+| BF-Conf | `gold_logit_slope` | 500 | 0.150825 | [0.134188, 0.167482] |
+| CF-Stage | `late_delta` | 500 | -3.372306 | [-3.852121, -2.902451] |
+
+Secondary transfer rates in the same run: BF-Patch `answer_transfer_rate=0.462`, BF-Swap `swap_answer_transfer_rate=0.462`.
 
 Recorded W16 hundred-scale trace-latent result:
 
