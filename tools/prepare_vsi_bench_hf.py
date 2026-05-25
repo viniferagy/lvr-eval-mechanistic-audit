@@ -147,7 +147,7 @@ def save_image_or_grid(record: dict[str, Any], out_dir: Path, idx: int, image_ro
 
 
 def normalize_answer(record: dict[str, Any]) -> Any:
-    answer = first_value(record, ["answer", "label", "target", "correct_answer", "gt_answer"])
+    answer = first_value(record, ["answer", "label", "target", "correct_answer", "gt_answer", "ground_truth"])
     choices = first_value(record, ["choices", "options", "answer_choices"])
     if isinstance(answer, int) and isinstance(choices, list) and 0 <= answer < len(choices):
         return choices[answer]

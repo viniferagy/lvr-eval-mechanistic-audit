@@ -14,7 +14,7 @@ DEFAULT_VSI_FIELD_MAP = {
     "id": ["id", "sample_id", "uid", "question_id"],
     "image": ["image", "image_path", "frame_grid", "video_frame_grid"],
     "question": ["question", "prompt", "query", "instruction"],
-    "answer": ["answer", "label", "target", "correct_answer"],
+    "answer": ["answer", "label", "target", "correct_answer", "gt_answer", "ground_truth"],
     "choices": ["choices", "options", "answer_choices"],
     "rationale": ["rationale", "explanation"],
 }

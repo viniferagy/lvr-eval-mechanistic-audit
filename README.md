@@ -7,9 +7,9 @@
 This repository is currently at:
 
 ```text
-Engineering stage: W14-W15 LVR trace-latent primary-metric gate passed
-Scientific stage: Findings gate passed; true LVR hidden-feedback intervention, SPD/Maze evidence, Monet Transformers latent-mode range evidence, and LVR real-trace versions of all six v2 primary metrics are present
-Main-track next step: scale trace-latent LVR beyond n=50 and implement Monet modified-vLLM scheduler-native trace adapter
+Engineering stage: W16 hundred-scale LVR trace-latent + T1/T2/T3 matrix smoke passed
+Scientific stage: Findings gate passed; true LVR hidden-feedback intervention, SPD/Maze evidence, Monet Transformers latent-mode range evidence, LVR real-trace versions of all six v2 primary metrics, and hundred-scale T1/T2/T3 matrix evidence are present
+Main-track next step: scale trace-latent LVR from n=100 to n=500/1000, expand task matrices beyond hundred-scale, and implement Monet modified-vLLM scheduler-native trace adapter
 ```
 
 The W2 gate demonstrates that the infrastructure can run end to end on real SPD-Faith paired data and real GPU models. The W3 gate adds true inference-time LVR hidden-feedback patching at `n=50`. W4 localizes which hidden-feedback steps drive that transfer at `n=50`, `lvr_steps=8`. W5 sweeps latent feedback budget, W6 replicates the best-step intervention, W7 scales SPD regression evidence to `n=200`, and W8 packages the evidence for review. These gates are stronger than the original proxy scaffold, but they are still not final paper-scale evidence.
@@ -205,6 +205,8 @@ W2 v2 metrics are validated as runnable-v0 gates. They are not yet full paper-gr
 9. **W16 scale-up and T1-T4 matrix tooling**
 
    W16 adds configs and tooling for LVR trace-latent scale-up (`n=500` all six metrics, `n=1000` light metrics), T1/T2/T3 main matrices over Maze/SPD/BLINK, and T4 VSI-Bench output accuracy sanity. The new `output_accuracy_sanity` metric is intentionally not causal evidence; it is an external task-performance check.
+
+   A hundred-scale real run was completed on 2026-05-25 to verify the full path before launching the larger matrix. LVR trace-latent SPD `n=100` passed `tools/validate_trace_latent_gate.py` at `runs/w16_lvr_trace_latent_spd_n100_sharded/merged`. The T1/T2/T3 matrix passed `tools/validate_main_matrix.py` with 42 metric rows and 168 CI rows at `runs/w16_main_matrix_t1_t2_t3_n100/merged`. T4 VSI-Bench did not run because the public HF table has scene metadata but no local visual frames/frame grids.
 
 ## Data Sources
 
@@ -403,6 +405,32 @@ bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
   --allow-disabled-metrics
 ```
 
+Recorded W16 hundred-scale trace-latent result:
+
+```bash
+bash tools/run_and_hold.sh 0,1,2,3 bash tools/launch_main_matrix.sh \
+  --configs /tmp/lvr_trace_latent_spd_n100.yaml \
+  --models lvr_7b \
+  --metrics 'pf_a_corruption_selectivity|pf_b_patch_alignment|bf_patch_answer_transfer|bf_swap_latent_replacement|bf_conf_calibrated_progression|cf_stage_decay' \
+  --gpus 0,1,2,3 \
+  --run-root runs/w16_lvr_trace_latent_spd_n100_sharded
+
+./venv/bin/python tools/merge_main_matrix.py runs/w16_lvr_trace_latent_spd_n100_sharded
+./venv/bin/python tools/validate_trace_latent_gate.py \
+  runs/w16_lvr_trace_latent_spd_n100_sharded/merged \
+  --min-pairs 100 \
+  --min-samples 100
+```
+
+| metric | scalar | n | value | 95% bootstrap CI |
+|---|---|---:|---:|---:|
+| PF-A | `selectivity` | 100 | -0.045730 | [-0.067747, -0.024061] |
+| PF-B | `native_alignment` | 100 | 0.845153 | [0.830550, 0.859188] |
+| BF-Patch | `logprob_margin_shift` | 100 | 0.060000 | [-0.020000, 0.160000] |
+| BF-Swap | `swap_margin_shift` | 100 | 0.000000 | [-0.100000, 0.100000] |
+| BF-Conf | `gold_logit_slope` | 100 | 0.149496 | [0.112923, 0.188046] |
+| CF-Stage | `late_delta` | 100 | -3.885112 | [-4.934226, -2.796776] |
+
 The W16 T1/T2/T3 matrix and T4 accuracy sanity:
 
 ```bash
@@ -427,6 +455,61 @@ bash tools/run_and_hold.sh 0,1,2,3 bash tools/launch_main_matrix.sh \
   --gpus 0,1,2,3 \
   --run-root runs/w16_vsi_accuracy_sanity
 ```
+
+Recorded W16 hundred-scale T1/T2/T3 matrix:
+
+```bash
+./venv/bin/python tools/prepare_blink_hf.py \
+  --configs Art_Style \
+  --split val \
+  --max-samples 100 \
+  --out data/blink_art_style_n100
+
+bash tools/run_and_hold.sh 0,1,2,3 bash tools/launch_main_matrix.sh \
+  --configs /tmp/main_maze_n100.yaml,/tmp/main_spd_n100.yaml,/tmp/main_blink_n100.yaml \
+  --models qwen2_5_vl_3b,qwen2_5_vl_7b,lvr_7b \
+  --metrics all \
+  --gpus 0,1,2,3 \
+  --run-root runs/w16_main_matrix_t1_t2_t3_n100
+
+./venv/bin/python tools/merge_main_matrix.py runs/w16_main_matrix_t1_t2_t3_n100
+./venv/bin/python tools/validate_main_matrix.py \
+  runs/w16_main_matrix_t1_t2_t3_n100 \
+  --tasks maze,spd_faith,blink \
+  --min-samples 100 \
+  --bf-min-pairs 100
+```
+
+T1 Maze `n=100`:
+
+| Metric | Qwen3B | Qwen7B | LVR-7B |
+|---|---:|---:|---:|
+| PF-A | -0.660587 | -0.898330 | -0.644481 |
+| PF-B | 0.475198 | 0.390295 | 0.458739 |
+| BF-Conf | 0.190406 | 0.278682 | 0.030451 |
+| CF-Stage | 1.465018 | 1.974893 | 1.516935 |
+
+T2 SPD-Faith `n=100`:
+
+| Metric | Qwen3B | Qwen7B | LVR-7B |
+|---|---:|---:|---:|
+| PF-A | 0.176829 | 0.192988 | 0.206082 |
+| PF-B | 0.684626 | 0.672777 | 0.769803 |
+| BF-Patch | 0.008750 | 0.020000 | -0.017578 |
+| BF-Swap | 0.006250 | 0.026250 | -0.031289 |
+| BF-Conf | 0.192592 | 0.349234 | 0.070154 |
+| CF-Stage | 1.845391 | 2.195018 | 1.387603 |
+
+T3 BLINK Art_Style `n=100`:
+
+| Metric | Qwen3B | Qwen7B | LVR-7B |
+|---|---:|---:|---:|
+| PF-A | 0.304636 | 0.243137 | 0.278320 |
+| PF-B | 0.543969 | 0.529590 | 0.634386 |
+| BF-Conf | -0.103736 | 0.069303 | 0.048056 |
+| CF-Stage | 1.725590 | 1.948871 | 1.565728 |
+
+The BLINK Art_Style run has no bbox/region metadata, so PF-A/PF-B are weak-oracle center-fallback diagnostics.
 
 ## Trace v2
 
