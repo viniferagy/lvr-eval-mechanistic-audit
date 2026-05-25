@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import shutil
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from pipeline.analysis import run_analysis
 from pipeline.sanity.report import run_sanity_for_metric_results, save_sanity_reports
+from pipeline.stats.mixed_effects import fit_mixed_effects
 
 
 def _read_json(path: Path):
@@ -55,6 +57,28 @@ def _load_metric_results_all(run_root: Path) -> list[dict]:
     return out
 
 
+def _read_yaml(path: Path) -> dict:
+    try:
+        import yaml
+
+        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _copy_representative_config(metric_results: list[dict], out_dir: Path) -> dict:
+    """Copy one source config snapshot into merged artifacts when available."""
+    for envelope in metric_results:
+        source = envelope.get("source_run_dir")
+        if not source:
+            continue
+        cfg_path = Path(str(source)) / "config_snapshot.yaml"
+        if cfg_path.is_file():
+            shutil.copyfile(cfg_path, out_dir / "config_snapshot.yaml")
+            return _read_yaml(cfg_path)
+    return {}
+
+
 def _copy_metric_files(metric_results: list[dict], out_dir: Path) -> None:
     metrics_dir = out_dir / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
@@ -79,11 +103,21 @@ def main(argv: list[str] | None = None) -> None:
     metric_results = _load_metric_results_all(run_root)
     if not metric_results:
         raise SystemExit(f"FAIL: no metric results found under {run_root}")
+    source_cfg = _copy_representative_config(metric_results, out_dir)
     _copy_metric_files(metric_results, out_dir)
     if not args.skip_sanity:
-        reports = run_sanity_for_metric_results(metric_results, cfg={"validation": {"v2": {"min_samples": 1, "min_pairs": 0, "allow_center_fallback": True}, "output_accuracy": {"min_samples": 1}}})
+        validation_cfg = dict((source_cfg.get("validation") or {}))
+        validation_cfg.setdefault("bf3", {}).setdefault("min_layers", 2)
+        validation_cfg.setdefault("v2", {}).update({
+            "min_samples": 1,
+            "min_pairs": 0,
+            "allow_center_fallback": True,
+        })
+        validation_cfg.setdefault("output_accuracy", {}).setdefault("min_samples", 1)
+        reports = run_sanity_for_metric_results(metric_results, cfg={"validation": validation_cfg})
         save_sanity_reports(reports, str(out_dir))
     run_analysis({}, {}, str(out_dir), metric_results=metric_results)
+    fit_mixed_effects(metric_results, out_path=out_dir / "mixed_effects_summary.json")
     (out_dir / "merge_manifest.json").write_text(json.dumps({
         "run_root": str(run_root),
         "n_metric_results": len(metric_results),

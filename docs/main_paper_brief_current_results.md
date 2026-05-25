@@ -2,7 +2,7 @@
 
 Date: 2026-05-25
 
-This note is a self-contained, Main-paper-oriented brief of the evidence currently in the repository. It is written as a compact manuscript skeleton rather than as an internal run log. The current evidence supports a reproducible causal audit toolkit and several strong gates, but it should not yet be described as final Main-track evidence: the full cross-task matrix still needs larger sample sizes, Monet still needs scheduler-native modified-vLLM tracing, PF-B still uses native alignment rather than DINO alignment, and mixed-effects analysis is not yet implemented.
+This note is a self-contained, Main-paper-oriented brief of the evidence currently in the repository. It is written as a compact manuscript skeleton rather than as an internal run log. The current evidence supports a reproducible causal audit toolkit and several strong gates, but it should not yet be described as final Main-track evidence: the full cross-task matrix still needs larger sample sizes, Monet still needs scheduler-native modified-vLLM tracing, and PF-B still uses native alignment rather than DINO alignment. A minimal fixed-effect regression summary is now implemented as a Main-readiness fallback; a full mixed-effects model remains future work.
 
 ## Introduction
 
@@ -14,7 +14,7 @@ However, performance alone does not tell us whether these latent states are fait
 
 We organize this into three axes. The first is availability: can task-relevant visual evidence be detected in the latent representation? The second is usage: does changing or replacing the latent state change the answer in the expected direction? The third is retention: does the latent contribution persist across early, middle, and late stages of reasoning, or does it decay before the final answer?
 
-The current repository implements a six-metric primary audit suite around these axes, supports Qwen2.5-VL baselines, LVR-7B, and a Monet-7B causal range gate, and has run evidence across SPD-Faith, MazePlanning, and BLINK. The strongest current result is the W16 LVR trace-latent scale gate: all six primary metrics now run on real LVR generation-time hidden-feedback states at n=500 on SPD-Faith. This moves beyond prompt-side or teacher-forced proxies for LVR. The broader task matrix is currently verified at n=100, and the Findings-level SPD/Maze gates are complete at n=200.
+The current repository implements a six-metric primary audit suite around these axes, supports Qwen2.5-VL baselines, LVR-7B, and a Monet-7B causal range gate, and has run evidence across SPD-Faith, MazePlanning, and BLINK. The strongest current LVR result is the W16/W17 trace-latent scale package: all six primary metrics run on real LVR generation-time hidden-feedback states at n=500 on SPD-Faith, and the lighter PF-A/PF-B/BF-Conf/CF-Stage subset now runs at n=1000. This moves beyond prompt-side or teacher-forced proxies for LVR. The broader task matrix is currently verified at n=100, and the Findings-level SPD/Maze gates are complete at n=200.
 
 ## Related Work
 
@@ -35,9 +35,9 @@ The current model pool has three main audit models plus one second-paradigm rang
 | Qwen2.5-VL-3B | no-latent small baseline | used in SPD, Maze, BLINK matrices |
 | Qwen2.5-VL-7B | no-latent baseline | used in SPD, Maze, BLINK matrices |
 | LVR-7B | explicit latent visual reasoning model | true hidden-feedback patch gates and trace-latent metrics |
-| Monet-7B | second latent paradigm | Transformers latent-mode causal gate only |
+| Monet-7B | second latent paradigm | Transformers latent-mode causal gate only; modified-vLLM trace deferred |
 
-For LVR, the key distinction is query-span audit versus trace-latent audit. Query-span metrics inspect prompt-side or teacher-forced spans and are useful for regression matrices, but they are not the same as intervening on the model's real hidden-feedback generation loop. The W14-W16 trace-latent path instruments LVR generation and captures `output_last_position_hidden_state` tensors during LVR mode. These tensors can then be compared or patched during generation.
+For LVR, the key distinction is query-span audit versus trace-latent audit. Query-span metrics inspect prompt-side or teacher-forced spans and are useful for regression matrices, but they are not the same as intervening on the model's real hidden-feedback generation loop. The W14-W16 trace-latent path instruments LVR generation and captures `output_last_position_hidden_state` tensors during LVR mode. These tensors can then be compared or patched during generation. Qwen rows are therefore query-span / hidden-state controls by design, LVR rows can be real generation-trace latent evidence when `trace_latent.enabled=true`, and Monet is currently a Transformers latent-mode real-latent range gate rather than a scheduler-native generation trace.
 
 ### Tasks
 
@@ -117,7 +117,7 @@ This proves that the repository can run a second latent-paradigm hidden-state pa
 
 ### LVR Trace-Latent Scale Gate
 
-W14-W16 upgrade the six primary LVR metrics to real generation-time hidden-feedback states. The current scale result is the n=500 SPD-Faith trace-latent gate:
+W14-W16 upgrade the six primary LVR metrics to real generation-time hidden-feedback states. The all-six scale result is the n=500 SPD-Faith trace-latent gate:
 
 | Metric | n | Value | 95% bootstrap CI |
 |---|---:|---:|---:|
@@ -130,7 +130,18 @@ W14-W16 upgrade the six primary LVR metrics to real generation-time hidden-feedb
 | BF-Conf gold_logit_slope | 500 | 0.150825 | [0.134188, 0.167482] |
 | CF-Stage late_delta | 500 | -3.372306 | [-3.852121, -2.902451] |
 
-The n=500 gate passed trace-latent validation with 6/6 sanity pass and 20 CI rows. The interpretation is mixed but informative: PF-B, BF-Conf, and CF-Stage are stable; BF-Patch and BF-Swap show stable answer-transfer rates around 0.462, but their margin-shift confidence intervals cross zero. This is evidence that answer transfer exists under the parsed constrained-answer protocol, while log-probability margin movement is not yet robust.
+The n=500 gate passed trace-latent validation with 6/6 sanity pass and 20 CI rows. The interpretation is mixed but informative: PF-B, BF-Conf, and CF-Stage are stable; BF-Patch and BF-Swap show stable answer-transfer rates around 0.462, but their margin-shift confidence intervals cross zero. A follow-up code path now prefers continuous latent logit-lens margins when generation scores are unavailable, so new runs should report margin provenance and answer-transfer confidence intervals rather than silently falling back to parsed-answer three-value margins.
+
+W17 completed the planned light scale gate for the four non-patch trace-latent metrics at n=1000:
+
+| Metric | n | Value | 95% bootstrap CI |
+|---|---:|---:|---:|
+| PF-A selectivity | 1000 | -0.055257 | [-0.062864, -0.047651] |
+| PF-B native_alignment | 1000 | 0.835482 | [0.830548, 0.840310] |
+| BF-Conf gold_logit_slope | 1000 | 0.139953 | [0.128714, 0.151739] |
+| CF-Stage late_delta | 1000 | -3.844755 | [-4.168295, -3.525368] |
+
+This W17 artifact passed trace-latent validation, merged sanity, and the new Main-readiness artifact validator. It is deliberately a light gate: BF-Patch and BF-Swap remain represented by the n=500 all-six run.
 
 ### W16 T1/T2/T3 Hundred-Scale Matrix
 
@@ -148,10 +159,8 @@ The current evidence is strong enough to support a Findings-level claim: the rep
 
 It is not yet a final Main-paper causal matrix. The next steps are:
 
-1. Run the n=1000 light LVR trace-latent gate for PF-A, PF-B, BF-Conf, and CF-Stage.
-2. Expand T1/T2/T3 from n=100 checkpoint scale to n=800-1000 where data permits.
-3. Add local VSI-Bench images/frame grids for T4 accuracy sanity.
-4. Implement Monet modified-vLLM scheduler-native tracing.
-5. Replace or supplement PF-B native alignment with DINO-style alignment.
-6. Implement mixed-effects analysis over the full matrix.
-
+1. Expand T1/T2/T3 from n=100 checkpoint scale to n=800-1000 where data permits.
+2. Add local VSI-Bench images/frame grids for T4 accuracy sanity.
+3. Keep Monet as a Transformers latent-mode range gate for the Main-shortest path; implement modified-vLLM scheduler-native tracing as a separate high-risk spike.
+4. Replace or supplement PF-B native alignment with DINO-style alignment.
+5. Replace the current fixed-effect regression fallback with full mixed-effects analysis over the full matrix.

@@ -239,6 +239,44 @@ def score_margin(trace: dict, wrapper, source_answer: Any, target_answer: Any) -
         return None
 
 
+def latent_logit_margin(wrapper, trace: dict, source_answer: Any, target_answer: Any) -> float | None:
+    """Continuous answer margin from the last captured latent hidden state.
+
+    Generation APIs do not always expose reliable constrained-answer scores.
+    This fallback uses the same logit-lens path as ``latent_answer_logit_curve``
+    but compares source and target answer token logits at the final captured
+    generation-time latent state.
+    """
+    if torch is None:
+        return None
+    source_id = first_token_id(wrapper, source_answer)
+    target_id = first_token_id(wrapper, target_answer)
+    if source_id is None or target_id is None:
+        return None
+    states = captured_state_items(trace)
+    if not states:
+        return None
+    tensor = states[-1].get("tensor")
+    if not torch.is_tensor(tensor):
+        return None
+    try:
+        h = tensor.detach().to(wrapper.model.device)
+        head_weight = getattr(wrapper.lm_head, "weight", None)
+        if torch.is_tensor(head_weight):
+            h = h.to(dtype=head_weight.dtype)
+        if h.dim() == 1:
+            h = h.unsqueeze(0)
+        if h.dim() > 2:
+            h = h.reshape(-1, h.shape[-1])
+        h = h[-1:, :]
+        normed = wrapper.final_norm(h) if wrapper.final_norm is not None else h
+        logits = wrapper.lm_head(normed)[0].detach().float()
+        value = float((logits[int(source_id)] - logits[int(target_id)]).cpu().item())
+        return value if np.isfinite(value) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def parsed_margin(parsed_answer: str | None, source_answer: str | None, target_answer: str | None) -> float | None:
     if parsed_answer is None or source_answer is None or target_answer is None:
         return None
@@ -376,6 +414,9 @@ def patch_pair(wrapper, sample, cfg_root: dict, *,
         "patched_margin": patched_summary.get("patched_margin"),
         "logprob_margin_shift": patched_summary.get("latent_margin_shift"),
         "latent_margin_shift": patched_summary.get("latent_margin_shift"),
+        "effective_margin_shift": patched_summary.get("effective_margin_shift"),
+        "latent_logit_margin_shift": patched_summary.get("latent_logit_margin_shift"),
+        "margin_source": patched_summary.get("margin_source"),
         "trace_quality": patched_summary.get("trace_quality"),
         "source_trace_quality": source_trace.get("trace_quality"),
         "missing_modules": patched_summary.get("missing_modules"),
@@ -392,6 +433,12 @@ def patch_pair(wrapper, sample, cfg_root: dict, *,
         "trace_latent_mode": True,
         "reduction": {
             "logprob_margin_shift": patched_summary.get("latent_margin_shift"),
+            "effective_margin_shift": patched_summary.get("effective_margin_shift"),
+            "latent_logit_margin_shift": patched_summary.get("latent_logit_margin_shift"),
+            "answer_transfer_rate": (
+                float(bool(patched_summary.get("answer_transferred")))
+                if patched_summary.get("answer_transferred") is not None else None
+            ),
             "answer_transfer": (
                 float(bool(patched_summary.get("answer_transferred")))
                 if patched_summary.get("answer_transferred") is not None else None
@@ -407,10 +454,39 @@ def _patch_record(*, patched_trace: dict, clean_trace: dict, wrapper, sample, so
     parsed_clean = parse_candidate(clean_trace.get("generated_text"))
     source_answer_for_margin = parsed_source or source.answer
     target_answer_for_margin = parse_candidate(sample.answer) or sample.answer
-    clean_margin = score_margin(clean_trace, wrapper, source_answer_for_margin, target_answer_for_margin)
-    patched_margin = score_margin(patched_trace, wrapper, source_answer_for_margin, target_answer_for_margin)
-    margin_source = "generation_scores"
-    if clean_margin is None or patched_margin is None:
+    clean_margin = score_margin(
+        clean_trace,
+        wrapper,
+        source_answer_for_margin,
+        target_answer_for_margin,
+    )
+    patched_margin = score_margin(
+        patched_trace,
+        wrapper,
+        source_answer_for_margin,
+        target_answer_for_margin,
+    )
+    latent_clean_margin = None
+    latent_patched_margin = None
+    margin_source = "generation_scores" if clean_margin is not None and patched_margin is not None else None
+    if margin_source is None:
+        latent_clean_margin = latent_logit_margin(
+            wrapper,
+            clean_trace,
+            source_answer_for_margin,
+            target_answer_for_margin,
+        )
+        latent_patched_margin = latent_logit_margin(
+            wrapper,
+            patched_trace,
+            source_answer_for_margin,
+            target_answer_for_margin,
+        )
+        if latent_clean_margin is not None and latent_patched_margin is not None:
+            clean_margin = latent_clean_margin
+            patched_margin = latent_patched_margin
+            margin_source = "latent_logit_lens"
+    if margin_source is None:
         clean_margin = parsed_margin(parsed_clean, parsed_source, parse_candidate(sample.answer))
         patched_margin = parsed_margin(parsed_patched, parsed_source, parse_candidate(sample.answer))
         margin_source = "parsed_answer_fallback"
@@ -431,6 +507,14 @@ def _patch_record(*, patched_trace: dict, clean_trace: dict, wrapper, sample, so
         "clean_margin": clean_margin,
         "patched_margin": patched_margin,
         "latent_margin_shift": margin_shift,
+        "effective_margin_shift": margin_shift,
+        "latent_logit_clean_margin": latent_clean_margin,
+        "latent_logit_patched_margin": latent_patched_margin,
+        "latent_logit_margin_shift": (
+            latent_patched_margin - latent_clean_margin
+            if latent_patched_margin is not None and latent_clean_margin is not None
+            else None
+        ),
         "margin_source": margin_source,
         "trace_quality": patched_trace.get("trace_quality"),
         "missing_modules": patched_trace.get("missing_modules"),

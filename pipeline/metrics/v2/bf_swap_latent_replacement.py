@@ -49,9 +49,23 @@ def _cell_summary(cell: dict, records: list[dict]) -> dict:
         for r in valid
         if r.get("answer_transferred") is not None
     ]
+    effective_shifts = [
+        float(r["effective_margin_shift"])
+        for r in valid
+        if r.get("effective_margin_shift") is not None
+        and np.isfinite(float(r["effective_margin_shift"]))
+    ]
+    latent_logit_shifts = [
+        float(r["latent_logit_margin_shift"])
+        for r in valid
+        if r.get("latent_logit_margin_shift") is not None
+        and np.isfinite(float(r["latent_logit_margin_shift"]))
+    ]
     return {
         **cell,
         "swap_margin_shift": _mean(shifts),
+        "effective_margin_shift": _mean(effective_shifts),
+        "latent_logit_margin_shift": _mean(latent_logit_shifts),
         "swap_answer_transfer_rate": _mean(transfers),
         "n_paired": len(records),
         "n_success": len(valid),
@@ -75,6 +89,9 @@ def _flatten_sample_records(cells: list[dict], *, include_controls: bool = False
                 "position_bucket": cell.get("position_bucket"),
                 "reduction": {
                     "swap_margin_shift": record.get("logprob_margin_shift"),
+                    "effective_margin_shift": record.get("effective_margin_shift"),
+                    "latent_logit_margin_shift": record.get("latent_logit_margin_shift"),
+                    "swap_answer_transfer_rate": float(bool(record.get("answer_transferred"))),
                     "swap_answer_transfer": float(bool(record.get("answer_transferred"))),
                 },
             })
@@ -94,10 +111,24 @@ def reduce_cells(cells: list[dict]) -> dict | None:
         for c in primary_cells
         if c.get("swap_answer_transfer_rate") is not None
     ]
+    effective_shifts = [
+        float(c["effective_margin_shift"])
+        for c in primary_cells
+        if c.get("effective_margin_shift") is not None
+        and np.isfinite(float(c["effective_margin_shift"]))
+    ]
+    latent_logit_shifts = [
+        float(c["latent_logit_margin_shift"])
+        for c in primary_cells
+        if c.get("latent_logit_margin_shift") is not None
+        and np.isfinite(float(c["latent_logit_margin_shift"]))
+    ]
     if not shifts and not transfers:
         return None
     return {
         "swap_margin_shift": _mean(shifts),
+        "effective_margin_shift": _mean(effective_shifts),
+        "latent_logit_margin_shift": _mean(latent_logit_shifts),
         "swap_answer_transfer_rate": _mean(transfers),
         "n_paired": int(max((c.get("n_paired", 0) for c in primary_cells), default=0)),
         "n_cells": len(primary_cells),

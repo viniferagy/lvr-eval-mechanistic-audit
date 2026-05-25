@@ -62,6 +62,7 @@ from pipeline.metrics.lvr_generation_trace import run as run_lvr_trace_metric
 from pipeline.preregistration import build_lock_payload, hash_manifest, load_manifest
 from pipeline.results import make_metric_result
 from pipeline.stats.bootstrap import paired_bootstrap
+from pipeline.stats.mixed_effects import fit_mixed_effects
 from pipeline.degradation import curve_features
 from pipeline.analysis import build_summary_with_ci, run_analysis
 from pipeline import ablation as ABL
@@ -83,6 +84,8 @@ from tools.prepare_monet_sft_hf import extract_prompt_answer, strip_latent_token
 from tools.validate_findings_gate import main as validate_findings_gate_main
 from tools.validate_main_matrix import main as validate_main_matrix_main
 from tools.validate_monet_latent import main as validate_monet_latent_main
+from tools.validate_main_paper_readiness import main as validate_main_paper_readiness_main
+from tools.validate_trace_margin_quality import main as validate_trace_margin_quality_main
 from tools.validate_trace_latent_gate import main as validate_trace_latent_gate_main
 from tools.validate_w3_latent import main as validate_w3_latent_main
 from tools.validate_w4_stepsweep import main as validate_w4_stepsweep_main
@@ -884,6 +887,7 @@ def test_preregistration_and_bootstrap():
     assert len(lock["primary_metrics"]) == 6
     assert lock["experimental_metrics"]
     assert {gate["gate_id"] for gate in lock["gates"]} >= {"W5_capacity_sweep", "W8_evidence_pack"}
+    assert {"qwen_query_span_control", "lvr_generation_trace_latent", "monet_transformers_latent_range_gate"} <= set(manifest["evidence_level_policy"])
 
     ci = paired_bootstrap([1, 2, 3, 4], seed=1, n_resamples=200)
     assert ci is not None and ci.n == 4
@@ -909,6 +913,33 @@ def test_preregistration_and_bootstrap():
     ], seed=1)
     row = next(r for r in grouped_rows if r["scalar"] == "logprob_margin_shift")
     assert row["n"] == 2 and abs(row["mean"] - 3.5) < 1e-9
+    transfer_rows = build_summary_with_ci([
+        make_metric_result("bf_patch_answer_transfer", "fake", {
+            "samples": [
+                {"id": "a", "paired_id": "a", "reduction": {"answer_transfer_rate": 1.0}},
+                {"id": "b", "paired_id": "b", "reduction": {"answer_transfer_rate": 0.0}},
+            ]
+        }),
+        make_metric_result("bf_swap_latent_replacement", "fake", {
+            "samples": [
+                {"id": "a", "paired_id": "a", "reduction": {"swap_answer_transfer_rate": 1.0}},
+                {"id": "b", "paired_id": "b", "reduction": {"swap_answer_transfer_rate": 0.0}},
+            ]
+        }),
+    ], seed=1)
+    assert any(r["scalar"] == "answer_transfer_rate" for r in transfer_rows)
+    assert any(r["scalar"] == "swap_answer_transfer_rate" for r in transfer_rows)
+    mixed = fit_mixed_effects(metric_results=[
+        make_metric_result("pf_a_corruption_selectivity", "m0", {
+            "task": "spd_faith",
+            "reduction": {"selectivity": 0.1, "n": 3},
+        }),
+        make_metric_result("pf_a_corruption_selectivity", "m1", {
+            "task": "maze",
+            "reduction": {"selectivity": 0.2, "n": 3},
+        }),
+    ])
+    assert mixed["status"].startswith("implemented") and "pf_a_corruption_selectivity" in mixed["models"]
     for item in manifest["primary_metrics"]:
         spec = get_metric(item["metric_id"])
         schema = spec.require_run().__globals__.get("build_schema", lambda: {})()
@@ -2157,9 +2188,12 @@ def test_trace_latent_w14_w15_fixtures():
                 torch.full((1, 4), value),
                 torch.full((1, 4), value + 0.2),
             ]
-            scores = [torch.zeros(1, 4)]
-            scores[-1][0, 1] = -value
-            scores[-1][0, 2] = value
+            include_scores = "with_scores" in str(question)
+            scores = None
+            if include_scores:
+                scores = [torch.zeros(1, 4)]
+                scores[-1][0, 1] = -value
+                scores[-1][0, 2] = value
             generated = "modified" if value > 0 else "original"
             return {
                 "generated_text": generated,
@@ -2236,6 +2270,8 @@ def test_trace_latent_w14_w15_fixtures():
     patch_rec = TL.patch_pair(wrapper, sample, cfg)
     assert patch_rec["answer_transferred"] is True
     assert patch_rec["logprob_margin_shift"] is not None
+    assert patch_rec["margin_source"] == "latent_logit_lens"
+    assert patch_rec["latent_logit_margin_shift"] is not None
 
     payloads = {
         "pf_a_corruption_selectivity": run_pf_a_metric(wrapper, [sample], cfg, "lvr_7b"),
@@ -2285,6 +2321,29 @@ def test_trace_latent_w14_w15_fixtures():
     save_sanity_reports(sanity, str(run_dir))
     run_analysis({}, {}, str(run_dir), metric_results=metric_results)
     validate_trace_latent_gate_main([str(run_dir), "--min-pairs", "1", "--min-samples", "1"])
+    validate_trace_margin_quality_main([str(run_dir), "--min-records", "1"])
+
+    bad_dir = Path(tempfile.mkdtemp(prefix="trace_latent_bad_margin_"))
+    (bad_dir / "metrics").mkdir()
+    (bad_dir / "sanity").mkdir()
+    bad_payload = copy.deepcopy(payloads["bf_patch_answer_transfer"])
+    for cell in bad_payload.get("cells") or []:
+        for record in cell.get("records") or []:
+            record["margin_source"] = "parsed_answer_fallback"
+            record["effective_margin_shift"] = record.get("logprob_margin_shift")
+    bad_env = make_metric_result("bf_patch_answer_transfer", "lvr_7b", bad_payload)
+    (bad_dir / "metrics" / "bf_patch_answer_transfer_lvr_7b.json").write_text(
+        json.dumps(bad_env, indent=2),
+        encoding="utf-8",
+    )
+    try:
+        validate_trace_margin_quality_main([str(bad_dir), "--min-records", "1", "--max-parsed-fallback-ratio", "0.2"])
+        raise AssertionError("trace margin validator should reject parsed fallback dominance")
+    except SystemExit as exc:
+        assert (
+            "parsed fallback ratio too high" in str(exc)
+            or "has no continuous margin-source records" in str(exc)
+        )
 
     cfg_file = yaml.safe_load(Path("config.lvr_trace_latent.w14_w15.yaml").read_text(encoding="utf-8"))
     assert cfg_file["models"]["lvr_7b"]["arch"] == "lvr_qwen2_5_vl_traced"
@@ -2375,6 +2434,12 @@ def test_output_accuracy_and_main_matrix_fixtures():
         json.dumps(build_summary_with_ci(metric_results), indent=2),
         encoding="utf-8",
     )
+    (merged / "sanity").mkdir()
+    (merged / "sanity" / "summary_sanity.json").write_text(
+        json.dumps({"overall_status": "pass"}),
+        encoding="utf-8",
+    )
+    fit_mixed_effects(metric_results, out_path=merged / "mixed_effects_summary.json")
     validate_main_matrix_main([
         str(run_root),
         "--tasks", "maze,spd_faith,blink",
@@ -2382,6 +2447,7 @@ def test_output_accuracy_and_main_matrix_fixtures():
         "--min-samples", "3",
         "--bf-min-pairs", "3",
     ])
+    validate_main_paper_readiness_main([str(merged)])
 
     acc_root = Path(tempfile.mkdtemp(prefix="accuracy_matrix_fixture_"))
     acc_run = acc_root / "vsi_qwen2_5_vl_3b"

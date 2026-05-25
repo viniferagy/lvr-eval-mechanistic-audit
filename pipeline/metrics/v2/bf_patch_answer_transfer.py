@@ -403,9 +403,23 @@ def _cell_summary(cell: dict, records: list[dict]) -> dict:
         if r.get("logprob_margin_shift") is not None
         and np.isfinite(float(r["logprob_margin_shift"]))
     ]
+    effective_shifts = [
+        float(r["effective_margin_shift"])
+        for r in records
+        if r.get("effective_margin_shift") is not None
+        and np.isfinite(float(r["effective_margin_shift"]))
+    ]
+    latent_logit_shifts = [
+        float(r["latent_logit_margin_shift"])
+        for r in records
+        if r.get("latent_logit_margin_shift") is not None
+        and np.isfinite(float(r["latent_logit_margin_shift"]))
+    ]
     return {
         **cell,
         "logprob_margin_shift": float(np.mean(valid_shifts)) if valid_shifts else None,
+        "effective_margin_shift": float(np.mean(effective_shifts)) if effective_shifts else None,
+        "latent_logit_margin_shift": float(np.mean(latent_logit_shifts)) if latent_logit_shifts else None,
         "logit_margin_shift": float(np.mean([
             float(r["logit_margin_shift"])
             for r in records
@@ -435,10 +449,24 @@ def reduce_cells(cells: list[dict]) -> dict | None:
         for c in cells
         if c.get("answer_transfer_rate") is not None
     ]
+    effective_shifts = [
+        float(c["effective_margin_shift"])
+        for c in cells
+        if c.get("effective_margin_shift") is not None
+        and np.isfinite(float(c["effective_margin_shift"]))
+    ]
+    latent_logit_shifts = [
+        float(c["latent_logit_margin_shift"])
+        for c in cells
+        if c.get("latent_logit_margin_shift") is not None
+        and np.isfinite(float(c["latent_logit_margin_shift"]))
+    ]
     if not shifts and not transfers:
         return None
     return {
         "logprob_margin_shift": float(np.mean(shifts)) if shifts else None,
+        "effective_margin_shift": float(np.mean(effective_shifts)) if effective_shifts else None,
+        "latent_logit_margin_shift": float(np.mean(latent_logit_shifts)) if latent_logit_shifts else None,
         "logit_margin_shift": float(np.mean([
             float(c["logit_margin_shift"]) for c in cells
             if c.get("logit_margin_shift") is not None
@@ -467,7 +495,12 @@ def _flatten_sample_records(cells: list[dict]) -> list[dict]:
                 "position_bucket": cell.get("position_bucket"),
                 "reduction": {
                     "logprob_margin_shift": record.get("logprob_margin_shift"),
+                    "effective_margin_shift": record.get("effective_margin_shift"),
+                    "latent_logit_margin_shift": record.get("latent_logit_margin_shift"),
                     "logit_margin_shift": record.get("logit_margin_shift"),
+                    "answer_transfer_rate": (
+                        float(bool(transferred)) if transferred is not None else None
+                    ),
                     "answer_transfer": (
                         float(bool(transferred)) if transferred is not None else None
                     ),

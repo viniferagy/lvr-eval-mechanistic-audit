@@ -6,10 +6,11 @@ Date: 2026-05-25
 
 This report records the W16 implementation state for scaling from gate-level evidence toward the Main-track audit matrix. It adds reusable configs, data loaders, output-accuracy sanity, matrix sharding, merge, and validation tooling.
 
-The LVR trace-latent six-metric `n=500` scale gate is now complete. The
-remaining scale target is the `n=1000` light trace-latent gate. On 2026-05-25,
-a real hundred-scale checkpoint was also run to verify the full W16 path end to
-end: LVR trace-latent SPD `n=100` and T1/T2/T3 main matrix `n=100`.
+The LVR trace-latent six-metric `n=500` scale gate is complete. The follow-up
+W17 `n=1000` light trace-latent gate is also complete for PF-A, PF-B, BF-Conf,
+and CF-Stage. On 2026-05-25, a real hundred-scale checkpoint was also run to
+verify the full W16 path end to end: LVR trace-latent SPD `n=100` and T1/T2/T3
+main matrix `n=100`.
 
 ## Configs
 
@@ -61,16 +62,18 @@ bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
 LVR trace-latent `n=1000` light gate:
 
 ```bash
-bash tools/run_and_hold.sh 0,1,2,3 ./venv/bin/python run_all.py \
-  --config config.lvr_trace_latent.spd_n1000_light.yaml \
+bash tools/run_and_hold.sh 0,1,2,3 bash tools/launch_main_matrix.sh \
+  --configs config.lvr_trace_latent.spd_n1000_light.yaml \
   --models lvr_7b \
-  --only pf_a_corruption_selectivity pf_b_patch_alignment \
-         bf_conf_calibrated_progression cf_stage_decay \
-  --device cuda:0 \
-  --run-name w16_lvr_trace_latent_spd_n1000_light
+  --metrics 'pf_a_corruption_selectivity|pf_b_patch_alignment|bf_conf_calibrated_progression|cf_stage_decay' \
+  --gpus 0,1,2,3 \
+  --run-root runs/w17_lvr_trace_latent_spd_n1000_light
+
+./venv/bin/python tools/merge_main_matrix.py \
+  runs/w17_lvr_trace_latent_spd_n1000_light
 
 ./venv/bin/python tools/validate_trace_latent_gate.py \
-  runs/w16_lvr_trace_latent_spd_n1000_light \
+  runs/w17_lvr_trace_latent_spd_n1000_light/merged \
   --min-pairs 0 \
   --min-samples 800 \
   --allow-disabled-metrics
@@ -191,6 +194,53 @@ Primary LVR trace-latent SPD `n=500` results:
 | BF-Swap swap_answer_transfer_rate | 500 | 0.462000 | not bootstrapped in current secondary summary |
 | BF-Conf gold_logit_slope | 500 | 0.150825 | [0.134188, 0.167482] |
 | CF-Stage late_delta | 500 | -3.372306 | [-3.852121, -2.902451] |
+
+## Recorded W17 LVR Trace-Latent n=1000 Light Gate
+
+LVR trace-latent SPD `n=1000`, sharded by metric across four GPUs through
+`tools/run_and_hold.sh`:
+
+```bash
+bash tools/run_and_hold.sh 0,1,2,3 bash tools/launch_main_matrix.sh \
+  --configs config.lvr_trace_latent.spd_n1000_light.yaml \
+  --models lvr_7b \
+  --metrics 'pf_a_corruption_selectivity|pf_b_patch_alignment|bf_conf_calibrated_progression|cf_stage_decay' \
+  --gpus 0,1,2,3 \
+  --run-root runs/w17_lvr_trace_latent_spd_n1000_light
+
+./venv/bin/python tools/merge_main_matrix.py \
+  runs/w17_lvr_trace_latent_spd_n1000_light
+
+./venv/bin/python tools/validate_trace_latent_gate.py \
+  runs/w17_lvr_trace_latent_spd_n1000_light/merged \
+  --allow-disabled-metrics \
+  --min-samples 800 \
+  --min-pairs 0
+
+./venv/bin/python tools/validate_main_paper_readiness.py \
+  runs/w17_lvr_trace_latent_spd_n1000_light/merged
+```
+
+Validation result:
+
+```text
+TRACE LATENT GATE VALIDATION PASSED
+MAIN PAPER READINESS VALIDATION PASSED
+sanity: 4/4 pass
+summary_with_ci rows: 16
+```
+
+Primary LVR trace-latent SPD `n=1000` light results:
+
+| Metric | n | value | 95% bootstrap CI |
+|---|---:|---:|---:|
+| PF-A selectivity | 1000 | -0.055257 | [-0.062864, -0.047651] |
+| PF-B native_alignment | 1000 | 0.835482 | [0.830548, 0.840310] |
+| BF-Conf gold_logit_slope | 1000 | 0.139953 | [0.128714, 0.151739] |
+| CF-Stage late_delta | 1000 | -3.844755 | [-4.168295, -3.525368] |
+
+This is a light gate. BF-Patch and BF-Swap are disabled by config and remain
+represented at scale by the W16 `n=500` all-six run.
 
 Trace-latent n=500 visualization:
 

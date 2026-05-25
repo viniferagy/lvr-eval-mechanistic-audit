@@ -23,6 +23,11 @@ PRIMARY_SCALARS = {
     "cf_stage_decay": "late_delta",
 }
 PATCH_METRICS = {"bf_patch_answer_transfer", "bf_swap_latent_replacement"}
+TRANSFER_SCALARS = {
+    "bf_patch_answer_transfer": "answer_transfer_rate",
+    "bf_swap_latent_replacement": "swap_answer_transfer_rate",
+}
+CONTINUOUS_MARGIN_SOURCES = {"generation_scores", "latent_logit_lens"}
 
 
 def fail(msg: str) -> None:
@@ -66,6 +71,35 @@ def _patch_success(payload: dict) -> int:
     return total
 
 
+def _patch_margin_quality(payload: dict) -> dict:
+    total = 0
+    continuous = 0
+    parsed = 0
+    missing = 0
+    sources: dict[str, int] = {}
+    for cell in payload.get("cells") or []:
+        for record in cell.get("records") or []:
+            if record.get("error") is not None:
+                continue
+            total += 1
+            source = str(record.get("margin_source") or "missing")
+            sources[source] = sources.get(source, 0) + 1
+            if source in CONTINUOUS_MARGIN_SOURCES:
+                continuous += 1
+            elif source == "parsed_answer_fallback":
+                parsed += 1
+            else:
+                missing += 1
+    return {
+        "total": total,
+        "continuous": continuous,
+        "parsed": parsed,
+        "missing": missing,
+        "parsed_ratio": (float(parsed) / float(total)) if total else 1.0,
+        "sources": sources,
+    }
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("run_dir")
@@ -81,6 +115,12 @@ def main(argv: list[str] | None = None) -> None:
         nargs="+",
         default=None,
         help="Optional explicit trace-latent metric subset to validate, useful for entry smoke runs.",
+    )
+    ap.add_argument("--max-parsed-fallback-ratio", type=float, default=0.2)
+    ap.add_argument(
+        "--compat-allow-legacy-margin",
+        action="store_true",
+        help="Do not require margin_source / transfer CI rows; for validating pre-margin-fix runs.",
     )
     args = ap.parse_args(argv)
 
@@ -133,6 +173,18 @@ def main(argv: list[str] | None = None) -> None:
                 fail(f"{metric_id} n_paired too small: {n_paired} < {args.min_pairs}")
             if _patch_success(payload) < args.min_pairs:
                 fail(f"{metric_id} patch successes too small")
+            quality = _patch_margin_quality(payload)
+            print(f"{metric_id}: margin_quality={quality}")
+            if not args.compat_allow_legacy_margin:
+                if quality["total"] < args.min_pairs:
+                    fail(f"{metric_id} margin-quality records too small: {quality['total']} < {args.min_pairs}")
+                if quality["continuous"] <= 0:
+                    fail(f"{metric_id} has no continuous margin-source records")
+                if quality["parsed_ratio"] > args.max_parsed_fallback_ratio:
+                    fail(
+                        f"{metric_id} parsed fallback ratio too high: "
+                        f"{quality['parsed_ratio']:.3f} > {args.max_parsed_fallback_ratio:.3f}"
+                    )
         if metric_id == "bf_swap_latent_replacement":
             controls = {cell.get("control") for cell in payload.get("control_cells") or []}
             missing_controls = {"self_swap", "reverse_swap", "random_pair_swap"} - controls
@@ -153,6 +205,12 @@ def main(argv: list[str] | None = None) -> None:
             continue
         if (metric_id, "lvr_7b", scalar) not in primary_ci:
             fail(f"summary_with_ci missing primary row: {metric_id}/lvr_7b/{scalar}")
+    if not args.compat_allow_legacy_margin:
+        for metric_id, scalar in TRANSFER_SCALARS.items():
+            if metric_id not in required_metrics:
+                continue
+            if (metric_id, "lvr_7b", scalar) not in primary_ci:
+                fail(f"summary_with_ci missing transfer row: {metric_id}/lvr_7b/{scalar}")
 
     sanity_path = run_dir / "sanity" / "summary_sanity.json"
     if not sanity_path.is_file():

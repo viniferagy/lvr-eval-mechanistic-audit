@@ -136,7 +136,7 @@ In trace-latent mode, the intervention site is:
 forward_pre.last_position_hidden_state
 ```
 
-For generation-score margins, the code attempts token-level scoring from generation scores. When scores are unavailable or incomplete, trace-latent sanity can warn and use parsed constrained-answer fallback for transfer records. This is why W16 reports both margin shift and parsed answer-transfer rate.
+For generation-score margins, the code attempts token-level scoring from generation scores. When scores are unavailable or incomplete, the trace-latent path now falls back to a continuous latent logit-lens margin computed from the final captured hidden-feedback state through `final_norm` and `lm_head`. Only if both continuous paths fail does it use the parsed constrained-answer fallback. Patch records expose `margin_source`, `effective_margin_shift`, and `latent_logit_margin_shift`, and validators can fail runs that rely too heavily on parsed-answer fallback.
 
 Primary scalar:
 
@@ -238,7 +238,15 @@ runs/w16_lvr_trace_latent_spd_n500_sharded/merged/summary_with_ci.json
 runs/w16_lvr_trace_latent_spd_n500_sharded/merged/metric_plots/w16_trace_latent_n500_primary_heatmap.png
 ```
 
-`pipeline/stats/mixed_effects.py` is still a placeholder and raises `NotImplementedError`. This is not a bug for completed gates because no completed validator invokes mixed-effects analysis. It is a Main-paper remaining task.
+The W17 `n=1000` light run produced:
+
+```text
+runs/w17_lvr_trace_latent_spd_n1000_light/merged/summary_with_ci.json
+runs/w17_lvr_trace_latent_spd_n1000_light/merged/mixed_effects_summary.json
+runs/w17_lvr_trace_latent_spd_n1000_light/merged/metric_plots/
+```
+
+`pipeline/stats/mixed_effects.py` now writes a minimal Main-readiness regression artifact. It records the intended mixed-effects formula but implements a dependency-light fixed-effect fallback, `value ~ model + task`, so merged matrices can produce `mixed_effects_summary.json` offline. A full random-effect model remains a future paper-polish task rather than a completed claim.
 
 ## 7. Sharding and GPU Use
 
@@ -254,15 +262,15 @@ bash tools/run_and_hold.sh 0,1,2,3 <experiment command>
 CUDA_VISIBLE_DEVICES=<gpu> ./venv/bin/python run_all.py ... --device cuda:0 --no-analysis
 ```
 
-This pattern is correct because each child process sees only one physical GPU as `cuda:0`. After all shards finish, `tools/merge_main_matrix.py` merges metric envelopes into `RUN_ROOT/merged` and reruns analysis.
-
-One implementation caveat: the default merge sanity config is permissive because it must handle heterogeneous tasks. For the n=500 trace-latent result, merged sanity was rewritten with the real trace-latent config before final validation. The gate validator then passed, which is the stronger check.
+This pattern is correct because each child process sees only one physical GPU as `cuda:0`. After all shards finish, `tools/merge_main_matrix.py` merges metric envelopes into `RUN_ROOT/merged`, copies a representative `config_snapshot.yaml`, reruns analysis, writes `mixed_effects_summary.json`, and reruns merged sanity with the source validation settings where available.
 
 ## 8. Validators and Error Checks
 
 The main validators are:
 
-- `tools/validate_trace_latent_gate.py`: requires all expected trace-latent metrics, `trace_latent=True`, primary scalars, enough instrumented trace records, patch successes for BF metrics, control cells for BF-Swap, CI rows, sanity pass, and trace-latent plots.
+- `tools/validate_trace_latent_gate.py`: requires all expected trace-latent metrics, `trace_latent=True`, primary scalars, enough instrumented trace records, patch successes for BF metrics, control cells for BF-Swap, CI rows, sanity pass, trace-latent plots, transfer-rate CI rows, and acceptable parsed-fallback margin ratio for new runs.
+- `tools/validate_trace_margin_quality.py`: checks patch metric `margin_source` provenance directly and fails when parsed-answer fallback exceeds the configured threshold.
+- `tools/validate_main_paper_readiness.py`: checks manifest evidence-level discipline, `summary_with_ci.json`, `mixed_effects_summary.json`, and optionally trace margin quality.
 - `tools/validate_main_matrix.py`: checks task/model/metric coverage, sample thresholds, BF pair thresholds, and `summary_with_ci.json`.
 - `tools/validate_monet_latent.py`: checks Monet metric ID/model ID, latent mode path, `vllm_scheduler_native=false`, patch counts, captured state counts, shape matches, prereg lock, sanity pass, and CI rows.
 - `tools/validate_findings_gate.py`: checks the complete Findings evidence package, including true LVR latent gates, W7 SPD, and W9 Maze.
@@ -284,6 +292,7 @@ Completed and validated evidence:
 | W13 Monet latent gate | `runs/w13_monet_latent_patch_n50` | Monet validator pass |
 | W14-W15 LVR trace-latent n=50 | `runs/w14_w15_lvr_trace_latent_n50_v2` | trace validator pass |
 | W16 LVR trace-latent n=500 | `runs/w16_lvr_trace_latent_spd_n500_sharded/merged` | trace validator pass |
+| W17 LVR trace-latent n=1000 light | `runs/w17_lvr_trace_latent_spd_n1000_light/merged` | trace validator + main-readiness validator pass |
 | W16 T1/T2/T3 n=100 matrix | `runs/w16_main_matrix_t1_t2_t3_n100/merged` | main matrix validator pass |
 
 Recent code checks already passed in this repo state:
@@ -292,6 +301,8 @@ Recent code checks already passed in this repo state:
 py_compile: pass
 smoke_test.py: pass
 validate_trace_latent_gate.py on n=500: pass
+validate_trace_latent_gate.py on n=1000 light: pass
+validate_main_paper_readiness.py on n=1000 light: pass
 validate_main_matrix.py on T1/T2/T3 n=100: pass
 validate_monet_latent.py on W13: pass
 ```
@@ -300,13 +311,13 @@ validate_monet_latent.py on W13: pass
 
 No syntax or validator errors are known on the completed experiment paths. The following are intentional boundaries rather than hidden implementation errors:
 
-1. `pipeline/stats/mixed_effects.py` is not implemented. It is planned for the full Main matrix and should not be claimed as complete.
+1. `pipeline/stats/mixed_effects.py` implements a fixed-effect fallback, not a full random-effect mixed model. Use it as a readiness artifact, not as final statistical polish.
 2. Monet scheduler-native tracing is not implemented. W13 uses official Transformers `latent_mode` with `ce_patch_vec`, not modified-vLLM generation tracing.
 3. PF-B DINO alignment is not implemented in completed runs. Current PF-B claims are native-alignment claims.
 4. T4 VSI-Bench cannot run until local images or frame-grid images are staged.
 5. BLINK Art_Style n=100 has weak-oracle center fallback for PF metrics because reliable bboxes are absent locally.
 6. Query-span matrices and trace-latent LVR gates answer different questions. W7/W9/W16 main matrix checkpoint should not be described as entirely real latent intervention evidence.
-7. BF-Patch and BF-Swap margin shifts in the n=500 trace-latent run are near zero with confidence intervals crossing zero; answer-transfer rates are secondary but stable around 0.462.
+7. BF-Patch and BF-Swap margin shifts in the n=500 trace-latent run are near zero with confidence intervals crossing zero; answer-transfer rates are secondary but stable around 0.462. New patch/swap runs should use the continuous margin provenance checks and transfer-rate CI rows. The W17 `n=1000` light run intentionally disables BF-Patch/BF-Swap, so margin provenance is not expected in that artifact.
 
 ## 11. Implementation Conclusion
 
@@ -323,5 +334,4 @@ The current codebase correctly supports the completed audit path:
 - merged bootstrap summaries and plots;
 - strict validators for completed gates.
 
-The remaining work is not to fix a known broken path, but to extend the verified paths to larger samples, stronger cross-task coverage, Monet modified-vLLM tracing, DINO alignment, and mixed-effects statistics.
-
+The remaining work is not to fix a known broken path, but to extend the verified task matrices to larger samples, add local VSI visuals, stage fuller BLINK data, implement Monet modified-vLLM tracing as a separate spike, add DINO alignment, and replace the fixed-effect fallback with final mixed-effects statistics.

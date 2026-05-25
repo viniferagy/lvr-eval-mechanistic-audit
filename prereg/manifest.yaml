@@ -63,8 +63,28 @@ statistics:
     n_resamples: 5000
     paired: true
   mixed_effects:
-    formula: "metric_value ~ model + task + (1|sample_id)"
-    status: "planned_not_required_for_findings_gate"
+    formula: "metric_value ~ model + task + (1|dataset_or_sample_group)"
+    implemented_fallback: "value ~ model + task"
+    status: "implemented_fixed_effects_fallback_for_main_readiness"
+evidence_level_policy:
+  qwen_query_span_control:
+    models:
+      - "qwen2_5_vl_3b"
+      - "qwen2_5_vl_7b"
+    evidence_type: "query-span / hidden-state control"
+    boundary: "Qwen baselines have no latent visual reasoning loop; they are controls, not real-latent intervention evidence."
+  lvr_generation_trace_latent:
+    models:
+      - "lvr_7b"
+    evidence_type: "generation-time hidden-feedback trace-latent intervention"
+    trace_quality: "instrumented_sparse_v0"
+    boundary: "Applies only to configs using lvr_qwen2_5_vl_traced and trace_latent.enabled=true."
+  monet_transformers_latent_range_gate:
+    models:
+      - "monet_7b"
+    evidence_type: "official Transformers latent_mode ce_patch_vec hidden-state patch"
+    trace_quality: "monet_transformers_latent_mode_v0"
+    boundary: "Real-latent range gate, not modified-vLLM scheduler-native generation trace."
 gates:
   - gate_id: "W5_capacity_sweep"
     metric_id: "lvr_latent_patch_answer_transfer"
@@ -192,8 +212,10 @@ gates:
     sample_budgets:
       all_primary_metrics: 500
       light_metrics: 1000
-    status: "implemented_pending_full_gpu_run"
-    boundary: "scale-up configs and validators are implemented; full GPU artifacts are generated separately"
+    status: "n500_completed_n1000_light_completed"
+    completed_run_dir: "runs/w16_lvr_trace_latent_spd_n500_sharded/merged"
+    completed_light_run_dir: "runs/w17_lvr_trace_latent_spd_n1000_light/merged"
+    boundary: "n=500 all-six trace-latent gate is complete; n=1000 light gate is complete for PF-A/PF-B/BF-Conf/CF-Stage only, with BF-Patch/BF-Swap intentionally disabled"
   - gate_id: "W16_t1_t2_t3_main_matrix_plan"
     configs:
       - "config.main_maze_n1000.yaml"
