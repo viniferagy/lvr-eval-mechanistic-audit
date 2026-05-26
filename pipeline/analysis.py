@@ -442,6 +442,17 @@ def _numeric_sample_scalars(payload: dict) -> dict[str, list[float]]:
     return scalars
 
 
+def _continuous_margin_alias(metric_id: str, payload: dict) -> str | None:
+    config = payload.get("config") or {}
+    if config.get("trace_latent"):
+        return None
+    if metric_id == "bf_patch_answer_transfer":
+        return "logprob_margin_shift"
+    if metric_id == "bf_swap_latent_replacement":
+        return "swap_margin_shift"
+    return None
+
+
 def build_summary_with_ci(metric_results: list[dict], seed: int = 260523) -> list[dict]:
     rows: list[dict] = []
     for envelope in metric_results:
@@ -452,7 +463,11 @@ def build_summary_with_ci(metric_results: list[dict], seed: int = 260523) -> lis
         model = str(envelope.get("model"))
         task = str(envelope.get("task") or payload.get("task") or (payload.get("config") or {}).get("task") or "unknown")
         source_run_dir = envelope.get("source_run_dir") or payload.get("source_run_dir")
-        for scalar, values in sorted(_numeric_sample_scalars(payload).items()):
+        sample_scalars = _numeric_sample_scalars(payload)
+        alias = _continuous_margin_alias(metric_id, payload)
+        if alias and "continuous_margin_shift" not in sample_scalars and alias in sample_scalars:
+            sample_scalars["continuous_margin_shift"] = list(sample_scalars[alias])
+        for scalar, values in sorted(sample_scalars.items()):
             ci = paired_bootstrap(values, seed=seed)
             if ci is None:
                 rows.append({

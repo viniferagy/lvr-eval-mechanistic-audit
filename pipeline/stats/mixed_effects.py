@@ -54,6 +54,11 @@ def _rows_from_metric_results(metric_results: list[dict]) -> list[dict]:
         payload = envelope.get("payload") or {}
         reduction = payload.get("reduction") or {}
         value = reduction.get(scalar)
+        if value is None and scalar == "continuous_margin_shift":
+            if metric_id == "bf_patch_answer_transfer" and not (payload.get("config") or {}).get("trace_latent"):
+                value = reduction.get("logprob_margin_shift")
+            elif metric_id == "bf_swap_latent_replacement" and not (payload.get("config") or {}).get("trace_latent"):
+                value = reduction.get("swap_margin_shift")
         if value is None:
             samples = payload.get("samples") or []
             values = []
@@ -61,8 +66,14 @@ def _rows_from_metric_results(metric_results: list[dict]) -> list[dict]:
                 if not isinstance(sample, dict) or sample.get("error") is not None:
                     continue
                 sample_reduction = sample.get("reduction") or {}
-                if sample_reduction.get(scalar) is not None:
-                    values.append(sample_reduction.get(scalar))
+                sample_value = sample_reduction.get(scalar)
+                if sample_value is None and scalar == "continuous_margin_shift":
+                    if metric_id == "bf_patch_answer_transfer" and not (payload.get("config") or {}).get("trace_latent"):
+                        sample_value = sample_reduction.get("logprob_margin_shift")
+                    elif metric_id == "bf_swap_latent_replacement" and not (payload.get("config") or {}).get("trace_latent"):
+                        sample_value = sample_reduction.get("swap_margin_shift")
+                if sample_value is not None:
+                    values.append(sample_value)
             if values:
                 value = float(np.mean([float(item) for item in values]))
         if value is None:

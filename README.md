@@ -7,9 +7,9 @@
 This repository is currently at:
 
 ```text
-Engineering stage: W17 LVR trace-latent n=1000 light gate + W16 T1/T2/T3 n=100 matrix passed
-Scientific stage: Findings gate passed; true LVR hidden-feedback intervention, SPD/Maze evidence, Monet Transformers latent-mode range evidence, LVR real-trace versions of all six v2 primary metrics at n=500, LVR real-trace light metrics at n=1000, and hundred-scale T1/T2/T3 matrix evidence are present
-Main-track next step: expand T1/T2/T3 beyond hundred-scale where local data permits; keep Monet modified-vLLM scheduler-native tracing as a separate high-risk spike
+Engineering stage: W18 full local T1/T2/T3 matrix passed; W17 LVR trace-latent n=1000 light gate passed
+Scientific stage: Findings gate passed; true LVR hidden-feedback intervention, SPD/Maze evidence, Monet Transformers latent-mode range evidence, LVR real-trace versions of all six v2 primary metrics at n=500, LVR real-trace light metrics at n=1000, and W18 local main-matrix evidence are present
+Main-track next step: stage missing VStar/VSI visual data and upgrade fixed-effect fallback to sample-level mixed effects; keep Monet modified-vLLM scheduler-native tracing as a separate high-risk spike
 ```
 
 The W2 gate demonstrates that the infrastructure can run end to end on real SPD-Faith paired data and real GPU models. The W3 gate adds true inference-time LVR hidden-feedback patching at `n=50`. W4 localizes which hidden-feedback steps drive that transfer at `n=50`, `lvr_steps=8`. W5 sweeps latent feedback budget, W6 replicates the best-step intervention, W7 scales SPD regression evidence to `n=200`, and W8 packages the evidence for review. These gates are stronger than the original proxy scaffold, but they are still not final paper-scale evidence.
@@ -18,7 +18,7 @@ The SPD range runs treat `lvr_7b` as an LVR-weight model under query-span paired
 
 The Findings gate is explicit rather than implicit: `tools/validate_findings_gate.py` requires W3/W4/W6 true latent artifacts, W7 SPD artifacts, and a real Maze Findings run. The current local repository has all required artifacts, including `runs/w9_maze_findings_m0_m1_m2_n200_bbox`.
 
-The Main-track expansion now includes Monet and an LVR trace-latent metric upgrade. W12 established a standard-forward preflight for the public `NOVAglow646/Monet-7B` checkpoint and `NOVAglow646/Monet-SFT-125K` data. W13 adds a causal range gate on real SPD-Faith paired data using Monet's official Transformers latent-mode path (`ce_patch_pos` / `ce_patch_vec`): source counterfactual latent tensors are injected into target latent positions and scored over constrained `original` / `modified` answers. Local W13 run: `runs/w13_monet_latent_patch_n50`, `n=50`, sanity pass, `latent_answer_transfer_rate=0.06` with CI `[0.00, 0.14]`. W14-W15 then upgrades all six LVR v2 primary metrics to an opt-in real generation-trace latent path. W16 scales all six LVR trace-latent metrics to n=500, and W17 scales the lighter PF-A/PF-B/BF-Conf/CF-Stage subset to n=1000. Monet remains causal through Transformers latent mode only; it is still not the modified-vLLM scheduler-native generation loop.
+The Main-track expansion now includes Monet and an LVR trace-latent metric upgrade. W12 established a standard-forward preflight for the public `NOVAglow646/Monet-7B` checkpoint and `NOVAglow646/Monet-SFT-125K` data. W13 adds a causal range gate on real SPD-Faith paired data using Monet's official Transformers latent-mode path (`ce_patch_pos` / `ce_patch_vec`): source counterfactual latent tensors are injected into target latent positions and scored over constrained `original` / `modified` answers. Local W13 run: `runs/w13_monet_latent_patch_n50`, `n=50`, sanity pass, `latent_answer_transfer_rate=0.06` with CI `[0.00, 0.14]`. W14-W15 then upgrades all six LVR v2 primary metrics to an opt-in real generation-trace latent path. W16 scales all six LVR trace-latent metrics to n=500, and W17 scales the lighter PF-A/PF-B/BF-Conf/CF-Stage subset to n=1000. W18 completes the local main-matrix run for SPD-Faith (`n=1000`, BF subset `n=500`), Maze (full local `n=500`), and BLINK (`n=1000`, weak-oracle center fallback). Monet remains causal through Transformers latent mode only; it is still not the modified-vLLM scheduler-native generation loop.
 
 ## Why Monet Next
 
@@ -213,6 +213,39 @@ W2 v2 metrics are validated as runnable-v0 gates. They are not yet full paper-gr
    The LVR trace-latent SPD `n=500` six-metric scale gate completed on 2026-05-25 and passed `tools/validate_trace_latent_gate.py` at `runs/w16_lvr_trace_latent_spd_n500_sharded/merged`. The W17 light gate completed on 2026-05-26 at `runs/w17_lvr_trace_latent_spd_n1000_light/merged`, with PF-A, PF-B, BF-Conf, and CF-Stage at `n=1000`; BF-Patch/BF-Swap are intentionally disabled in this light config. A hundred-scale real matrix was also completed to verify the full path before launching the larger cross-task matrix: LVR trace-latent SPD `n=100` passed at `runs/w16_lvr_trace_latent_spd_n100_sharded/merged`, and the T1/T2/T3 matrix passed `tools/validate_main_matrix.py` with 42 metric rows and 168 CI rows at `runs/w16_main_matrix_t1_t2_t3_n100/merged`. T4 VSI-Bench did not run because the public HF table has scene metadata but no local visual frames/frame grids.
 
    BF-Patch/BF-Swap trace-latent margins now diagnose generation-score reliability explicitly. New runs record `clean_score_diagnostic` and `patched_score_diagnostic` separately, use generation scores only when the generated candidate token aligns with the score index, and otherwise fall back to `latent_logit_lens` before the final parsed-answer fallback. The Main-facing scalar is `continuous_margin_shift`, which excludes parsed-answer fallback; `effective_margin_shift` and legacy `logprob_margin_shift` / `swap_margin_shift` remain compatibility fields. The validators surface failure-reason counts so a Main run can distinguish missing scores, tokenization issues, and decision-index mismatch instead of hiding them behind one fallback label.
+
+10. **W18 full local main matrix**
+
+   W18 runs the local T1/T2/T3 matrix across `qwen2_5_vl_3b`, `qwen2_5_vl_7b`, and `lvr_7b`. The validated artifact root is `runs/w18_main_matrix_full_local/merged`; the committed report with tables and line plots is `docs/validation_report_w18_full_local_matrix.md`.
+
+   | task | local scale | metrics |
+   |---|---:|---|
+   | T2 SPD-Faith | `n=1000`; BF paired subset `n=500` | all six primary metrics |
+   | T1 Maze | full local/upstream `n=500` | PF-A, PF-B, BF-Conf, CF-Stage |
+   | T3 BLINK | `n=1000` | PF-A, PF-B, BF-Conf, CF-Stage; weak-oracle center fallback |
+
+   V*Bench/VStar and VSI-Bench are not claimed as completed model results in W18: local VStar staging found zero usable visual samples because the cached HF table contains relative image paths and no bbox fields; local VSI staging also wrote zero samples because frame-grid images/answer mapping are missing.
+
+   Rebuild the W18 report from existing artifacts:
+
+   ```bash
+   MPLCONFIGDIR=/tmp/matplotlib-lvr-eval ./venv/bin/python tools/merge_main_matrix.py runs/w18_main_matrix_full_local
+   MPLCONFIGDIR=/tmp/matplotlib-lvr-eval ./venv/bin/python tools/summarize_w18_results.py \
+     --plots-dir docs/figures/w18_full_local_matrix
+   ```
+
+   Main validators:
+
+   ```bash
+   ./venv/bin/python tools/validate_main_matrix.py runs/w18_main_matrix_full_local \
+     --tasks maze,spd_faith,blink \
+     --min-samples 450 \
+     --bf-min-pairs 300
+
+   ./venv/bin/python tools/validate_main_paper_readiness.py \
+     runs/w18_main_matrix_full_local/merged \
+     --mode full_main_matrix
+   ```
 
 ## Data Sources
 

@@ -42,6 +42,36 @@ def answer_transfer_rate(records: list[dict]) -> float | None:
     return sum(1 for r in valid if bool(r["answer_transferred"])) / len(valid)
 
 
+def continuous_margin_shift_from_record(record: dict) -> float | None:
+    """Return the Main-facing continuous BF margin for one patch record.
+
+    Standard query-span BF records score full candidate answer sequences with a
+    forced forward pass, so their legacy logprob margin is already continuous.
+    Trace-latent records may use parsed-answer fallback; those must provide an
+    explicit continuous_margin_shift to be included here.
+    """
+    value = record.get("continuous_margin_shift")
+    if value is not None:
+        try:
+            numeric = float(value)
+            return numeric if np.isfinite(numeric) else None
+        except (TypeError, ValueError):
+            return None
+    if (
+        record.get("margin_source") is None
+        and record.get("clean_source_logprob") is not None
+        and record.get("patched_source_logprob") is not None
+    ):
+        value = record.get("logprob_margin_shift")
+        if value is not None:
+            try:
+                numeric = float(value)
+                return numeric if np.isfinite(numeric) else None
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def build_schema() -> dict:
     return {
         "metric_id": METRIC_ID,
@@ -360,6 +390,7 @@ def patch_one_pair(wrapper, sample, *, layer: int, position_bucket: str) -> dict
         if patched_scores["margin"] is not None and clean_scores["margin"] is not None
         else None
     )
+    continuous_margin_shift = logprob_margin_shift
 
     return {
         "id": sample.id,
@@ -384,6 +415,14 @@ def patch_one_pair(wrapper, sample, *, layer: int, position_bucket: str) -> dict
         "clean_margin": clean_margin,
         "patched_margin": patched_margin,
         "logprob_margin_shift": logprob_margin_shift,
+        "sequence_logprob_margin_shift": logprob_margin_shift,
+        "effective_margin_shift": logprob_margin_shift,
+        "continuous_margin_shift": continuous_margin_shift,
+        "latent_logit_margin_shift": None,
+        "generation_score_margin_shift": None,
+        "margin_source": "candidate_sequence_logprob" if continuous_margin_shift is not None else None,
+        "clean_margin_source": "candidate_sequence_logprob" if clean_margin is not None else None,
+        "patched_margin_source": "candidate_sequence_logprob" if patched_margin is not None else None,
         "logit_margin_shift": (
             diagnostic_token_margin - clean_token_margin
             if diagnostic_token_margin is not None and clean_token_margin is not None
@@ -417,10 +456,10 @@ def _cell_summary(cell: dict, records: list[dict]) -> dict:
         and np.isfinite(float(r["latent_logit_margin_shift"]))
     ]
     continuous_shifts = [
-        float(r["continuous_margin_shift"])
+        float(value)
         for r in records
-        if r.get("continuous_margin_shift") is not None
-        and np.isfinite(float(r["continuous_margin_shift"]))
+        for value in [continuous_margin_shift_from_record(r)]
+        if value is not None
     ]
     score_diagnostics = TL.score_diagnostic_summary(records)
     return {
@@ -513,7 +552,7 @@ def _flatten_sample_records(cells: list[dict]) -> list[dict]:
                 "reduction": {
                     "logprob_margin_shift": record.get("logprob_margin_shift"),
                     "effective_margin_shift": record.get("effective_margin_shift"),
-                    "continuous_margin_shift": record.get("continuous_margin_shift"),
+                    "continuous_margin_shift": continuous_margin_shift_from_record(record),
                     "latent_logit_margin_shift": record.get("latent_logit_margin_shift"),
                     "generation_score_margin_shift": record.get("generation_score_margin_shift"),
                     "logit_margin_shift": record.get("logit_margin_shift"),

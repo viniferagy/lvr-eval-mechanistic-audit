@@ -7,7 +7,11 @@ import random
 import numpy as np
 
 from . import trace_latent as TL
-from .bf_patch_answer_transfer import patch_grid, patch_one_pair
+from .bf_patch_answer_transfer import (
+    continuous_margin_shift_from_record,
+    patch_grid,
+    patch_one_pair,
+)
 from ..base import MetricSpec
 
 
@@ -63,10 +67,10 @@ def _cell_summary(cell: dict, records: list[dict]) -> dict:
         and np.isfinite(float(r["latent_logit_margin_shift"]))
     ]
     continuous_shifts = [
-        float(r["continuous_margin_shift"])
+        float(value)
         for r in valid
-        if r.get("continuous_margin_shift") is not None
-        and np.isfinite(float(r["continuous_margin_shift"]))
+        for value in [continuous_margin_shift_from_record(r)]
+        if value is not None
     ]
     score_diagnostics = TL.score_diagnostic_summary(records)
     return {
@@ -100,7 +104,7 @@ def _flatten_sample_records(cells: list[dict], *, include_controls: bool = False
                 "reduction": {
                     "swap_margin_shift": record.get("logprob_margin_shift"),
                     "effective_margin_shift": record.get("effective_margin_shift"),
-                    "continuous_margin_shift": record.get("continuous_margin_shift"),
+                    "continuous_margin_shift": continuous_margin_shift_from_record(record),
                     "latent_logit_margin_shift": record.get("latent_logit_margin_shift"),
                     "generation_score_margin_shift": record.get("generation_score_margin_shift"),
                     "swap_answer_transfer_rate": float(bool(record.get("answer_transferred"))),
