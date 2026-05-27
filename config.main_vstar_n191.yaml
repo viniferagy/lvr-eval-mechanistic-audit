@@ -22,8 +22,6 @@ models:
     lvr_token: "<|lvr|>"
     lvr_latent_end_token: "<|lvr_latent_end|>"
     lvr_end_token: "<|lvr_end|>"
-runtime:
-  lvr_wait_timeout_minutes: 120
 audit:
   mode: "standard_forward"
   query_target: "auto"
@@ -66,12 +64,22 @@ pf3:
 pf_a:
   seed: 260719
   severity: 1.0
+  # V*Bench boxes are often tiny high-resolution answer regions. Keep this at
+  # zero for the preregistered run; pilot may set 32 if bbox area is too small.
+  mask_dilate_px: 0
 pf_b:
   seed: 260719
   severity: 1.0
   use_dino: false
+  mask_dilate_px: 0
 bf_conf:
-  text_only_control: true
+  # High-resolution V*Bench is a spotlight localization run. Keep BF-Conf to a
+  # single lower-resolution image+text forward per sample; text-only control is
+  # covered in the lower-resolution main matrix. PF-A/PF-B still use the 1024px
+  # audit image budget above.
+  text_only_control: false
+  max_image_side: 512
+  max_image_pixels: 262144
 cf_stage:
   readout: "pf3"
   max_samples: 191

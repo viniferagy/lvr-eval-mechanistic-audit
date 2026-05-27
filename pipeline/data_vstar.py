@@ -58,7 +58,11 @@ def _question_with_choices(question: str, choices: Any) -> str:
     if isinstance(choices, dict):
         parts = [f"{key}. {value}" for key, value in choices.items()]
     else:
-        parts = [str(item) for item in choices]
+        letters = ["A", "B", "C", "D", "E", "F"]
+        parts = [
+            f"{letters[idx]}. {item}" if idx < len(letters) else str(item)
+            for idx, item in enumerate(choices)
+        ]
     if not parts:
         return question
     return f"{question}\n\nChoices:\n" + "\n".join(parts) + "\n\nAnswer with the correct option or answer text."
@@ -119,8 +123,20 @@ def load_vstar(cfg: dict) -> list[ProbeSample]:
         choices = _value(record, cfg, "choices")
         question = _question_with_choices(str(_value(record, cfg, "question", default="")), choices)
         sample_id = str(_value(record, cfg, "id", default=f"vstar_{i:06d}"))
-        high_resolution = max(image.size) >= 1500
+        high_resolution = bool(record.get("high_resolution", max(image.size) >= 1500))
         high_res_count += int(high_resolution)
+        metadata = dict(record.get("task_metadata") or {})
+        metadata.update({
+            "source_type": "vstar",
+            "choices": choices,
+            "category": _value(record, cfg, "category"),
+            "high_resolution": high_resolution,
+            "bbox_required": require_bbox,
+            "bbox_count": len(bboxes),
+            "bbox_format": record.get("bbox_format", "xyxy_absolute"),
+        })
+        if record.get("answer_text") is not None:
+            metadata["answer_text"] = record.get("answer_text")
 
         out.append(ProbeSample(
             id=sample_id,
@@ -133,13 +149,7 @@ def load_vstar(cfg: dict) -> list[ProbeSample]:
             rationale=_value(record, cfg, "rationale"),
             paired_id=str(record.get("paired_id", sample_id)),
             source_dataset=record.get("dataset", "vstar"),
-            task_metadata={
-                "source_type": "vstar",
-                "choices": choices,
-                "category": _value(record, cfg, "category"),
-                "high_resolution": high_resolution,
-                "bbox_required": require_bbox,
-            },
+            task_metadata=metadata,
         ))
 
     logger.info(

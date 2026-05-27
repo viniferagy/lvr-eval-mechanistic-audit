@@ -1,12 +1,18 @@
 """BF-Conf calibrated confidence progression."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import numpy as np
 
 from ... import internal_metrics as IM
 from . import trace_latent as TL
 from .bf_patch_answer_transfer import _answer_token_id, _model_forward
 from ..base import MetricSpec
+
+try:
+    import torch
+except ImportError:  # pragma: no cover - smoke environments may omit torch.
+    torch = None
 
 
 METRIC_ID = "bf_conf_calibrated_progression"
@@ -31,6 +37,40 @@ def build_schema() -> dict:
 
 def _cfg(cfg: dict) -> dict:
     return cfg.get("bf_conf", {}) or {}
+
+
+@contextmanager
+def _bf_conf_image_override(wrapper, local_cfg: dict):
+    """Temporarily apply BF-Conf-specific image limits.
+
+    High-resolution spotlight tasks such as V*Bench need 1024px images for
+    bbox-corruption metrics, but BF-Conf is a trajectory readout rather than a
+    localization metric. Allowing a smaller BF-Conf image budget keeps the run
+    on 24GB GPUs without changing PF-A/PF-B evidence.
+    """
+    override = {
+        key: local_cfg[key]
+        for key in ("max_image_side", "max_image_pixels")
+        if key in local_cfg
+    }
+    if not override:
+        yield
+        return
+    cfg_root = getattr(wrapper, "cfg", None)
+    if not isinstance(cfg_root, dict):
+        yield
+        return
+    audit_cfg = cfg_root.setdefault("audit", {})
+    old = {key: audit_cfg.get(key) for key in override}
+    try:
+        audit_cfg.update(override)
+        yield
+    finally:
+        for key, value in old.items():
+            if value is None:
+                audit_cfg.pop(key, None)
+            else:
+                audit_cfg[key] = value
 
 
 def _safe_slope(values: list[float]) -> float | None:
@@ -74,6 +114,57 @@ def _answer_logits_by_layer(wrapper, inputs, query_span, answer_token_id: int) -
         logits = wrapper.lm_head(normed)
         values.append(float(logits[0, int(answer_token_id)].detach().float().cpu().item()))
     return values
+
+
+def _layer_entropy_and_answer_logits(wrapper, inputs, query_span, answer_token_id: int | None) -> tuple[list[float], list[float]]:
+    """Capture one query-position hidden vector per layer in a single forward.
+
+    V*Bench uses 1024px high-resolution images. Running one forward for the
+    BF-Conf entropy curve and a second forward for answer logits can fragment
+    24GB GPUs. This helper records CPU copies of the layer vectors once, then
+    computes both logit-lens entropy and the optional gold-answer logit.
+    """
+    if torch is None:
+        return [], []
+    last_pos = query_span.end - 1
+    captured: list[object | None] = [None] * wrapper.n_layers
+    handles = []
+
+    def make_hook(idx: int):
+        def hook(_module, _args, output):
+            hidden = output[0] if isinstance(output, tuple) else output
+            captured[idx] = hidden[0, last_pos, :].detach().cpu()
+            return output
+        return hook
+
+    for idx, layer in enumerate(wrapper.layers):
+        handles.append(layer.register_forward_hook(make_hook(idx)))
+    try:
+        _model_forward(wrapper, inputs)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    entropies: list[float] = []
+    answer_logits: list[float] = []
+    for hidden in captured:
+        if hidden is None:
+            continue
+        h = IM._to_model_device(hidden, wrapper)
+        if h.dim() == 1:
+            h = h.unsqueeze(0)
+        normed = wrapper.final_norm(h) if wrapper.final_norm is not None else h
+        logits = wrapper.lm_head(normed)
+        log_probs = torch.log_softmax(logits.float(), dim=-1)
+        probs = log_probs.exp()
+        entropy = -(probs * log_probs).sum(dim=-1)
+        entropies.append(float(entropy[0].detach().float().cpu().item()))
+        if answer_token_id is not None:
+            answer_logits.append(float(logits[0, int(answer_token_id)].detach().float().cpu().item()))
+        del h, normed, logits, log_probs, probs, entropy
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return entropies, answer_logits
 
 
 def _text_only_control(wrapper, sample, enabled: bool) -> dict:
@@ -175,15 +266,18 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
     per_sample = []
     for sample in samples:
         try:
-            image, image_meta = IM.prepare_image_for_audit(wrapper, sample.image)
+            with _bf_conf_image_override(wrapper, local):
+                image, image_meta = IM.prepare_image_for_audit(wrapper, sample.image)
             prepared = sample.__class__(**{**sample.__dict__, "image": image})
             inputs = wrapper.build_inputs_from_sample(prepared)
             spans = wrapper.adapter.get_spans(wrapper, inputs, None)
             query_span = spans.preferred_query_span()
-            curve = IM.bf3_curve_from_inputs(wrapper, inputs, query_span)
-            reduction = IM.bf3_reduce(np.asarray(curve, dtype=float))
             answer_token_id = _answer_token_id(wrapper, sample.answer)
-            answer_logits = _answer_logits_by_layer(wrapper, inputs, query_span, answer_token_id)
+            curve, answer_logits = _layer_entropy_and_answer_logits(wrapper, inputs, query_span, answer_token_id)
+            if not curve:
+                curve = IM.bf3_curve_from_inputs(wrapper, inputs, query_span)
+                answer_logits = _answer_logits_by_layer(wrapper, inputs, query_span, answer_token_id)
+            reduction = IM.bf3_reduce(np.asarray(curve, dtype=float))
             gold_slope = _safe_slope(answer_logits)
             reduction["gold_logit_slope"] = gold_slope
             per_sample.append({

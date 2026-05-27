@@ -25,11 +25,22 @@ def _empty_mask(image: Image.Image) -> np.ndarray:
     return np.zeros((h, w), dtype=bool)
 
 
-def _bbox_to_pixels(bbox: Iterable[float], width: int, height: int) -> tuple[int, int, int, int]:
+def _bbox_to_pixels(
+    bbox: Iterable[float],
+    width: int,
+    height: int,
+    *,
+    dilate_px: int = 0,
+) -> tuple[int, int, int, int]:
     x0, y0, x1, y1 = [float(v) for v in bbox]
     if max(abs(x0), abs(y0), abs(x1), abs(y1)) <= 1.0:
         x0, x1 = x0 * width, x1 * width
         y0, y1 = y0 * height, y1 * height
+    if dilate_px > 0:
+        x0 -= dilate_px
+        y0 -= dilate_px
+        x1 += dilate_px
+        y1 += dilate_px
     left = max(0, min(width, int(round(min(x0, x1)))))
     right = max(left + 1, min(width, int(round(max(x0, x1)))))
     top = max(0, min(height, int(round(min(y0, y1)))))
@@ -37,7 +48,7 @@ def _bbox_to_pixels(bbox: Iterable[float], width: int, height: int) -> tuple[int
     return left, top, right, bottom
 
 
-def relevant_mask(image: Image.Image, bboxes=None, region_mask=None) -> BinaryMask:
+def relevant_mask(image: Image.Image, bboxes=None, region_mask=None, *, dilate_px: int = 0) -> BinaryMask:
     if region_mask is not None:
         arr = np.asarray(region_mask, dtype=bool)
         return BinaryMask(arr, "relevant", "region_mask")
@@ -46,9 +57,14 @@ def relevant_mask(image: Image.Image, bboxes=None, region_mask=None) -> BinaryMa
     if bboxes:
         width, height = image.size
         for bbox in bboxes:
-            left, top, right, bottom = _bbox_to_pixels(bbox, width, height)
+            left, top, right, bottom = _bbox_to_pixels(
+                bbox,
+                width,
+                height,
+                dilate_px=max(0, int(dilate_px)),
+            )
             mask[top:bottom, left:right] = True
-        oracle_source = "bbox"
+        oracle_source = "bbox" if int(dilate_px) <= 0 else f"bbox_dilated_{int(dilate_px)}px"
     if not mask.any():
         # Fallback for datasets without region annotations: use centered area so
         # PF-A remains runnable but clearly records weak oracle quality.

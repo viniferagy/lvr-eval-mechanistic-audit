@@ -100,8 +100,14 @@ def _run_trace_latent(wrapper, samples, cfg: dict, model_tag: str) -> dict:
     records = []
     pf_a_cfg = cfg.get("pf_a", {})
     seed = int(pf_a_cfg.get("seed", 0))
+    mask_dilate_px = int(pf_a_cfg.get("mask_dilate_px", 0))
     for sample in samples:
-        rel = relevant_mask(sample.image, bboxes=sample.bboxes, region_mask=sample.region_mask)
+        rel = relevant_mask(
+            sample.image,
+            bboxes=sample.bboxes,
+            region_mask=sample.region_mask,
+            dilate_px=mask_dilate_px,
+        )
         irr = irrelevant_mask(sample.image, rel, seed=seed)
         rnd = random_mask(sample.image, coverage=max(rel.coverage, 0.01), seed=seed)
         base = {
@@ -164,6 +170,7 @@ def _run_trace_latent(wrapper, samples, cfg: dict, model_tag: str) -> dict:
             "seed": seed,
             "severity": pf_a_cfg.get("severity", 1.0),
             "fill": pf_a_cfg.get("fill", [0, 0, 0]),
+            "mask_dilate_px": mask_dilate_px,
             "comparison": "clean_vs_region_masked_generation_trace_latent_delta",
             "trace_latent": True,
             "distance": str(TL.cfg(cfg).get("distance", "l2")),
@@ -180,8 +187,14 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
     records = []
     pf_a_cfg = cfg.get("pf_a", {})
     seed = int(pf_a_cfg.get("seed", 0))
+    mask_dilate_px = int(pf_a_cfg.get("mask_dilate_px", 0))
     for sample in samples:
-        rel = relevant_mask(sample.image, bboxes=sample.bboxes, region_mask=sample.region_mask)
+        rel = relevant_mask(
+            sample.image,
+            bboxes=sample.bboxes,
+            region_mask=sample.region_mask,
+            dilate_px=mask_dilate_px,
+        )
         irr = irrelevant_mask(sample.image, rel, seed=seed)
         rnd = random_mask(sample.image, coverage=max(rel.coverage, 0.01), seed=seed)
         base = {
@@ -237,6 +250,7 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
             "seed": seed,
             "severity": pf_a_cfg.get("severity", 1.0),
             "fill": pf_a_cfg.get("fill", [0, 0, 0]),
+            "mask_dilate_px": mask_dilate_px,
             "comparison": "clean_vs_region_masked_attention_kl",
         },
         "reduction": reduce_samples(records),
