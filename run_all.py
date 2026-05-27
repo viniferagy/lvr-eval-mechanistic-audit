@@ -18,10 +18,9 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import json
 import logging
 import os
-from pathlib import Path
+import threading
 import time
 
 import yaml
@@ -44,23 +43,9 @@ from pipeline.sanity import (
 )
 
 
-LVR_MODEL_NAME = "LVR-7B"
-MODEL_READY_POLL_SECONDS = 30
-MODEL_READY_STABLE_SECONDS = 10
-DOWNLOAD_MARKER_SUFFIXES = (".incomplete", ".tmp", ".part", ".crdownload")
-WEIGHT_FILE_GLOBS = (
-    "*.safetensors",
-    "pytorch_model*.bin",
-    "*.pt",
-    "*.ckpt",
-    "*.gguf",
-)
-WEIGHT_INDEX_FILES = (
-    "model.safetensors.index.json",
-    "pytorch_model.bin.index.json",
-)
 DEFAULT_MODEL_TAGS = ["qwen2_5_vl_7b", "lvr_7b"]
-DEFAULT_LVR_WAIT_TIMEOUT_MINUTES = 120.0
+DEFAULT_PROGRESS_INTERVAL_SECONDS = 60.0
+PROGRESS_INTERVAL_ENV = "LVR_PROGRESS_INTERVAL_SECONDS"
 
 
 def setup_logging():
@@ -71,11 +56,92 @@ def setup_logging():
     )
 
 
-def is_lvr_model(cfg_model: dict) -> bool:
-    name = str(cfg_model.get("name", "")).lower()
-    path_name = Path(str(cfg_model.get("path", ""))).name.lower()
-    target = LVR_MODEL_NAME.lower()
-    return target == name or target == path_name
+def format_elapsed(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, sec = divmod(int(seconds), 60)
+    if minutes < 60:
+        return f"{minutes}m{sec:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m{sec:02d}s"
+
+
+def progress_interval_seconds(cfg: dict) -> float | None:
+    runtime = cfg.get("runtime", {}) or {}
+    raw = os.environ.get(PROGRESS_INTERVAL_ENV, runtime.get("progress_interval_seconds", DEFAULT_PROGRESS_INTERVAL_SECONDS))
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise SystemExit(f"{PROGRESS_INTERVAL_ENV}/runtime.progress_interval_seconds must be numeric") from None
+    if value <= 0:
+        return None
+    return value
+
+
+class ProgressHeartbeat:
+    """Log start/running/done lines around long operations."""
+
+    def __init__(self, log: logging.Logger, label: str, interval_seconds: float | None):
+        self.log = log
+        self.label = label
+        self.interval_seconds = interval_seconds
+        self.started = 0.0
+        self._stop: threading.Event | None = None
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self):
+        self.started = time.monotonic()
+        self.log.info("[progress] START %s", self.label)
+        if self.interval_seconds is not None:
+            self._stop = threading.Event()
+            self._thread = threading.Thread(target=self._loop, name="lvr-progress-heartbeat", daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._stop is not None:
+            self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        elapsed = format_elapsed(time.monotonic() - self.started)
+        status = "FAILED" if exc_type is not None else "DONE"
+        self.log.info("[progress] %s %s elapsed=%s", status, self.label, elapsed)
+        return False
+
+    def _loop(self):
+        assert self._stop is not None
+        assert self.interval_seconds is not None
+        while not self._stop.wait(self.interval_seconds):
+            elapsed = format_elapsed(time.monotonic() - self.started)
+            self.log.info("[progress] RUNNING %s elapsed=%s", self.label, elapsed)
+
+
+def metric_payload_summary(payload: dict) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    reduction = payload.get("reduction")
+    parts: list[str] = []
+    for key in ("n", "n_paired", "n_success", "n_error", "total_success", "total_error"):
+        value = payload.get(key)
+        if value is None and isinstance(reduction, dict):
+            value = reduction.get(key)
+        if value is not None:
+            parts.append(f"{key}={value}")
+    if isinstance(reduction, dict):
+        scalars = []
+        for key, value in reduction.items():
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)):
+                scalars.append(f"{key}={value:.6g}")
+            if len(scalars) >= 4:
+                break
+        if scalars:
+            parts.append("reduction{" + ", ".join(scalars) + "}")
+    return "" if not parts else " " + " ".join(parts)
 
 
 def model_aliases(cfg: dict) -> dict[str, str]:
@@ -97,108 +163,6 @@ def resolve_model_tags(tags: list[str], cfg: dict, log: logging.Logger) -> list[
     return resolved
 
 
-def order_models_for_execution(tags: list[str], cfg_models: dict, log: logging.Logger) -> list[str]:
-    non_lvr: list[str] = []
-    lvr: list[str] = []
-    for tag in tags:
-        cfg_model = cfg_models.get(tag)
-        if cfg_model and is_lvr_model(cfg_model):
-            lvr.append(tag)
-        else:
-            non_lvr.append(tag)
-
-    ordered = non_lvr + lvr
-    if ordered != tags:
-        log.info("LVR-7B 将最后执行: %s", " ".join(ordered))
-    return ordered
-
-
-def resolve_local_path(path_text: str) -> Path:
-    path = Path(os.path.expandvars(os.path.expanduser(path_text)))
-    if path.is_absolute():
-        return path
-    return Path.cwd() / path
-
-
-def first_download_marker(path: Path) -> Path | None:
-    if not path.exists() or not path.is_dir():
-        return None
-    for child in path.rglob("*"):
-        if child.is_file() and child.name.endswith(DOWNLOAD_MARKER_SUFFIXES):
-            return child
-    return None
-
-
-def first_weight_file(path: Path) -> Path | None:
-    for pattern in WEIGHT_FILE_GLOBS:
-        for child in path.glob(pattern):
-            if child.is_file():
-                return child
-    return None
-
-
-def missing_index_shards(path: Path) -> list[str] | None:
-    for index_name in WEIGHT_INDEX_FILES:
-        index_path = path / index_name
-        if not index_path.is_file():
-            continue
-        try:
-            weight_map = json.loads(index_path.read_text()).get("weight_map", {})
-        except (OSError, json.JSONDecodeError):
-            return [f"{index_name} 还不能读取"]
-
-        shard_names = sorted(set(weight_map.values()))
-        if not shard_names:
-            return [f"{index_name} 没有 weight_map"]
-
-        missing = [name for name in shard_names if not (path / name).is_file()]
-        return missing
-    return None
-
-
-def model_path_status(path: Path) -> tuple[bool, str]:
-    if not path.exists():
-        return False, "模型目录还不存在"
-    if not path.is_dir():
-        return False, "模型路径不是目录"
-
-    marker = first_download_marker(path)
-    if marker:
-        return False, f"检测到下载中的临时文件: {marker}"
-
-    if not (path / "config.json").is_file():
-        return False, "缺少 config.json"
-
-    missing_shards = missing_index_shards(path)
-    if missing_shards:
-        shown = ", ".join(missing_shards[:3])
-        more = "" if len(missing_shards) <= 3 else f" 等 {len(missing_shards)} 个"
-        return False, f"缺少权重分片: {shown}{more}"
-    if missing_shards == []:
-        return True, "ready"
-
-    if not first_weight_file(path):
-        return False, "缺少权重文件"
-    return True, "ready"
-
-
-def path_signature(path: Path) -> tuple[int, int, int]:
-    total_size = 0
-    file_count = 0
-    newest_mtime_ns = 0
-    for child in path.rglob("*"):
-        if not child.is_file():
-            continue
-        try:
-            stat = child.stat()
-        except OSError:
-            continue
-        total_size += stat.st_size
-        file_count += 1
-        newest_mtime_ns = max(newest_mtime_ns, stat.st_mtime_ns)
-    return file_count, total_size, newest_mtime_ns
-
-
 def validate_config(cfg: dict) -> None:
     if not isinstance(cfg, dict):
         raise SystemExit("config must be a YAML mapping")
@@ -212,46 +176,6 @@ def validate_config(cfg: dict) -> None:
     for key in ("root",):
         if key not in cfg["output"]:
             raise SystemExit(f"config.output.{key} is required")
-
-
-def lvr_wait_timeout_minutes(cfg: dict) -> float | None:
-    runtime = cfg.get("runtime", {}) or {}
-    value = runtime.get("lvr_wait_timeout_minutes", DEFAULT_LVR_WAIT_TIMEOUT_MINUTES)
-    if value is None:
-        return None
-    value = float(value)
-    if value <= 0:
-        return None
-    return value
-
-
-def wait_for_lvr_model_if_needed(tag: str, cfg_model: dict, log: logging.Logger, *, timeout_minutes: float | None = None):
-    if not is_lvr_model(cfg_model):
-        return
-
-    model_path = resolve_local_path(cfg_model["path"])
-    log.info("[%s] LVR-7B 排在最后；检查本地模型是否下载完成: %s", tag, model_path)
-
-    started = time.monotonic()
-    while True:
-        ready, reason = model_path_status(model_path)
-        if ready:
-            signature = path_signature(model_path)
-            time.sleep(MODEL_READY_STABLE_SECONDS)
-            ready_after_wait, reason_after_wait = model_path_status(model_path)
-            if ready_after_wait and path_signature(model_path) == signature:
-                log.info("[%s] LVR-7B 已就绪，开始执行", tag)
-                return
-            reason = reason_after_wait if not ready_after_wait else "模型文件还在变化"
-
-        elapsed_min = (time.monotonic() - started) / 60
-        if timeout_minutes is not None and elapsed_min >= float(timeout_minutes):
-            raise SystemExit(
-                f"[{tag}] timed out after {elapsed_min:.1f} min waiting for LVR model at "
-                f"{model_path}: {reason}"
-            )
-        log.info("[%s] 等待 LVR-7B 下载完成（%.1f min）：%s", tag, elapsed_min, reason)
-        time.sleep(MODEL_READY_POLL_SECONDS)
 
 
 def metric_enabled(cfg: dict, metric_id: str) -> bool:
@@ -347,6 +271,11 @@ def main():
 
     metric_ids = selected_metric_ids(args.only, cfg)
     log.info("selected metrics = %s", " ".join(metric_ids) if metric_ids else "(none)")
+    heartbeat_interval = progress_interval_seconds(cfg)
+    if heartbeat_interval is None:
+        log.info("[progress] heartbeat disabled")
+    else:
+        log.info("[progress] heartbeat interval = %s", format_elapsed(heartbeat_interval))
     task = str((cfg.get("data") or {}).get("source_type") or "unknown")
     validation_cfg = cfg.get("validation", {})
     do_sanity = validation_cfg.get("run_sanity", True) and not args.no_sanity
@@ -356,27 +285,31 @@ def main():
     metric_results: list[dict] = []
 
     model_tags = resolve_model_tags(args.models, cfg, log)
-    model_tags = order_models_for_execution(model_tags, cfg["models"], log)
+    total_metric_jobs = sum(1 for tag in model_tags if tag in cfg["models"]) * len(metric_ids)
+    completed_metric_jobs = 0
     for tag in model_tags:
         if tag not in cfg["models"]:
             log.warning("config 中无模型 %s，跳过", tag)
             continue
-        wait_for_lvr_model_if_needed(
-            tag,
-            cfg["models"][tag],
-            log,
-            timeout_minutes=lvr_wait_timeout_minutes(cfg),
-        )
-        wrapper = load_model(
-            cfg["models"][tag],
-            dtype=cfg["inference"]["dtype"],
-            device=cfg["inference"]["device"],
-            cfg=cfg,
-        )
+        with ProgressHeartbeat(log, f"load_model model={tag}", heartbeat_interval):
+            wrapper = load_model(
+                cfg["models"][tag],
+                dtype=cfg["inference"]["dtype"],
+                device=cfg["inference"]["device"],
+                cfg=cfg,
+            )
 
-        for metric_id in metric_ids:
-            res = run_metric(metric_id, wrapper, samples, cfg, tag)
+        for metric_index, metric_id in enumerate(metric_ids, start=1):
+            label = (
+                f"metric {completed_metric_jobs + 1}/{total_metric_jobs} "
+                f"model={tag} metric={metric_id} samples={len(samples)} "
+                f"model_metric={metric_index}/{len(metric_ids)}"
+            )
+            with ProgressHeartbeat(log, label, heartbeat_interval):
+                res = run_metric(metric_id, wrapper, samples, cfg, tag)
+            log.info("[progress] RESULT model=%s metric=%s%s", tag, metric_id, metric_payload_summary(res))
             metric_results.append(write_metric_result(out_dir, metric_id, tag, res, task=task))
+            completed_metric_jobs += 1
             if metric_id in {"bf1_latent_ablation", "bf1_layer_ablation"}:
                 ablation_results[tag] = res
             elif metric_id == "cf2_pf_decay_curve":
@@ -391,8 +324,9 @@ def main():
             pass
 
     if do_sanity:
-        sanity_reports = run_sanity_for_metric_results(metric_results, cfg)
-        sanity_dir = save_sanity_reports(sanity_reports, out_dir)
+        with ProgressHeartbeat(log, f"sanity metric_results={len(metric_results)}", heartbeat_interval):
+            sanity_reports = run_sanity_for_metric_results(metric_results, cfg)
+            sanity_dir = save_sanity_reports(sanity_reports, out_dir)
         if has_failed_checks(sanity_reports):
             msg = f"sanity checks reported failures -> {sanity_dir}"
             if validation_cfg.get("fail_fast", False):
@@ -403,7 +337,8 @@ def main():
             log.info("sanity checks saved -> %s", sanity_dir)
 
     if not args.no_analysis:
-        run_analysis(ablation_results, decay_results, out_dir, metric_results=metric_results)
+        with ProgressHeartbeat(log, f"analysis metric_results={len(metric_results)}", heartbeat_interval):
+            run_analysis(ablation_results, decay_results, out_dir, metric_results=metric_results)
 
     log.info("ALL DONE -> %s", out_dir)
 

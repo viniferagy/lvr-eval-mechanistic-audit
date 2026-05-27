@@ -10,8 +10,6 @@ models:
     lvr_token: "<|lvr|>"
     lvr_latent_end_token: "<|lvr_latent_end|>"
     lvr_end_token: "<|lvr_end|>"
-runtime:
-  lvr_wait_timeout_minutes: 120
 audit:
   mode: "generation_trace"
   query_target: "auto"

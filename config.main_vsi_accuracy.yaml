@@ -29,8 +29,6 @@ models:
     monet_source_path: "../Monet"
     layer_path: null
     image_pad_token: "<|image_pad|>"
-runtime:
-  lvr_wait_timeout_minutes: 120
 audit:
   mode: "standard_forward"
   query_target: "auto"
@@ -55,6 +53,7 @@ metrics:
 output_accuracy:
   batch_size: 1
   max_new_tokens: 64
+  progress_every: 25
 validation:
   run_sanity: true
   fail_fast: true

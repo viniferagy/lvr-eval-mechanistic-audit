@@ -13,9 +13,6 @@ models:
     latent_end_token: "</abs_vis_token>"
     latent_end_id: 151667
 
-runtime:
-  lvr_wait_timeout_minutes: 120
-
 audit:
   mode: "monet_transformers_latent_patch"
   max_image_side: 384

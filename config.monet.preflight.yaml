@@ -10,9 +10,6 @@ models:
     latent_start_id: 151666
     latent_end_id: 151667
 
-runtime:
-  lvr_wait_timeout_minutes: 120
-
 audit:
   mode: "standard_forward"
   query_target: "auto"

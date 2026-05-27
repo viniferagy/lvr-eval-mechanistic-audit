@@ -239,12 +239,31 @@ gates:
       - "qwen2_5_vl_3b"
       - "qwen2_5_vl_7b"
       - "lvr_7b"
-    status: "implemented_pending_full_gpu_run"
-    boundary: "T4 is output accuracy sanity only; BLINK PF/PF-B may use weak-oracle center fallback when bbox metadata is absent"
+    status: "t1_t2_t3_matrix_complete_t4_visual_staged_pending_accuracy_run"
+    t4_public_data: "nyu-visionx/VSI-Bench"
+    t4_visual_source: "official scannetpp.zip converted to 50 static frame-grid JPEGs"
+    t4_visual_staging:
+      frame_grid_stats: "data/vsi_raw/frame_grids/frame_grid_prepare_stats.json"
+      manifest: "data/vsi_bench/manifest.jsonl"
+      prepared_rows: 1458
+      unique_scene_grids: 50
+      skipped_no_answer: 0
+      frame_grid_protocol: "16-frame 4x4 static image grid"
+    boundary: "T4 is output accuracy sanity only; current local T4 staging is the official VSI-Bench scannetpp visual subset, not the full three-zip VSI visual set. Models see one static 16-frame image grid rather than native video or the official 32-frame protocol, so accuracy is not directly comparable to published VSI-Bench video-LLM numbers. BLINK PF/PF-B may use weak-oracle center fallback when bbox metadata is absent"
   - gate_id: "W20_spotlight_vstar_high_resolution"
-    model: "lvr_7b"
+    role: "spotlight"
     public_data: "craigwu/vstar_bench"
-    adapter_arch: "lvr_qwen2_5_vl_traced"
+    public_data_loader: "huggingface_hub.snapshot_download"
+    public_data_note: |
+      The Hugging Face parquet/Data Studio projection omits the per-image
+      JSON bbox field. The preregistered V*Bench path therefore downloads the
+      full dataset repository and reads direct_attributes/sa_XXXXX.json and
+      relative_position/sa_XXXXX.json directly. Do not replace this with
+      datasets.load_dataset("craigwu/vstar_bench").
+    models:
+      - "qwen2_5_vl_3b"
+      - "qwen2_5_vl_7b"
+      - "lvr_7b"
     config: "config.main_vstar_n191.yaml"
     sample_budget: 191
     metrics:
@@ -257,12 +276,23 @@ gates:
       - "native_alignment"
       - "gold_logit_slope"
       - "late_delta"
-    spotlight_hypothesis: |
-      PF-A selectivity on V*Bench should be substantially larger than on SPD-Faith,
-      because V*Bench's relevant region is small, well-localized, and bbox-annotated.
-      A null or reversed result on LVR vs Qwen baselines would be evidence that
-      LVR's latent visual reasoning does not preferentially attend to bbox regions.
-    status: "planned"
+    spotlight_hypotheses:
+      H1: |
+        For LVR-7B, PF-A selectivity on V*Bench is substantially larger
+        than on SPD-Faith. This would support the claim that LVR's latent
+        visual reasoning preferentially attends to small, well-localized
+        answer regions.
+      H2: |
+        H1 holds for LVR-7B but not for Qwen-VL baselines. A flat or smaller
+        V*Bench-vs-SPD delta on Qwen would isolate the effect to LVR's latent
+        loop rather than to generic VLM scale.
+    statistical_notes: |
+      V*Bench-vs-SPD-Faith comparison uses independent two-sample bootstrap,
+      not paired bootstrap, because the datasets are not matched sample-wise.
+      n=191 makes this a qualitative spotlight gate, not a Main matrix row.
+    status: "planned_W20"
     boundary: |
       V*Bench has 191 total samples; this is a small-n spotlight gate,
-      not a Main matrix entry. CI widths will be large; report descriptively.
+      not a Main matrix entry. V*Bench bbox regions can cover less than 1%
+      of the image; if pilot coverage is too small, rerun with preregistered
+      bbox dilation sensitivity rather than silently changing the main config.
