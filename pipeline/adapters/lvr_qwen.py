@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import types
 from pathlib import Path
 
 import torch
@@ -57,6 +58,7 @@ class LVRQwenAdapter(QwenVLAdapter):
                 trust_remote_code=True,
                 attn_implementation="eager",
             )
+            self._patch_generation_cache_position_compat(model)
         except Exception as exc:
             raise RuntimeError(
                 "Failed to load LVR model via official QwenWithLVR path. "
@@ -69,6 +71,29 @@ class LVRQwenAdapter(QwenVLAdapter):
         image_pad_id = self._image_pad_id(processor, cfg_model)
         self._ensure_lvr_ids(model, processor, cfg_model)
         return ModelBundle(model=model, processor=processor, image_pad_id=image_pad_id)
+
+    def _patch_generation_cache_position_compat(self, model) -> None:
+        """Accept the old two-arg cache-position call used by the LVR source.
+
+        Current Transformers expects `_get_initial_cache_position(seq_length,
+        device, model_kwargs)`. Some VincentLeebang/lvr generation branches
+        still call `_get_initial_cache_position(input_ids, model_kwargs)`.
+        Patch only the loaded model instance so external source files remain
+        untouched.
+        """
+        original = getattr(model, "_get_initial_cache_position", None)
+        if original is None or getattr(original, "_lvr_eval_compat", False):
+            return
+
+        def compat(this, *args, **kwargs):
+            if len(args) == 2 and not kwargs:
+                input_ids, model_kwargs = args
+                if hasattr(input_ids, "shape") and hasattr(input_ids, "device"):
+                    return original(int(input_ids.shape[-1]), input_ids.device, model_kwargs)
+            return original(*args, **kwargs)
+
+        compat._lvr_eval_compat = True  # type: ignore[attr-defined]
+        model._get_initial_cache_position = types.MethodType(compat, model)
 
     def _ensure_lvr_source_importable(self, cfg_model: dict):
         """Add the official VincentLeebang/lvr checkout to sys.path if configured."""
@@ -347,6 +372,37 @@ class LVRQwenAdapter(QwenVLAdapter):
             "lvr_block_spans": lvr_block_spans,
             "unexpected_lvr_inner_positions": unexpected_lvr_inner_positions,
         }
+
+    @torch.no_grad()
+    def generate(self, wrapper, images: list, prompts: list[str],
+                 max_new_tokens: int = 64) -> list[str]:
+        cfg = getattr(wrapper, "cfg", {}) or {}
+        audit_cfg = cfg.get("audit", {}) if isinstance(cfg, dict) else {}
+        decoding_strategy = audit_cfg.get("lvr_decoding_strategy", "steps")
+        lvr_steps = int(audit_cfg.get("lvr_steps", 16))
+
+        images = [self._prepare_image(wrapper, image) for image in images]
+        messages = [[{"role": "user", "content": [
+            {"type": "image", "image": image},
+            {"type": "text", "text": prompt},
+        ]}] for image, prompt in zip(images, prompts)]
+        texts = [
+            wrapper.processor.apply_chat_template(
+                message, tokenize=False, add_generation_prompt=True)
+            for message in messages
+        ]
+        inputs = wrapper.processor(
+            text=texts, images=list(images), padding=True, return_tensors="pt"
+        ).to(wrapper.model.device)
+        generated = wrapper.model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            decoding_strategy=decoding_strategy,
+            lvr_steps=[lvr_steps] * len(images),
+        )
+        trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated)]
+        return wrapper.processor.batch_decode(trimmed, skip_special_tokens=True)
 
     @torch.no_grad()
     def generate_with_trace(

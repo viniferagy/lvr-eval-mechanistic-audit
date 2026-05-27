@@ -62,6 +62,37 @@ def _question_with_choices(question: str, choices: Any) -> str:
     return f"{question}\n\nChoices:\n" + "\n".join(parts) + "\n\nAnswer with the correct option or answer text."
 
 
+def _choice_text_for_letter(choices: Any, letter: str) -> str | None:
+    letter = str(letter or "").strip().upper()
+    if len(letter) != 1 or letter not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        return None
+    idx = ord(letter) - ord("A")
+    if isinstance(choices, dict):
+        value = choices.get(letter) or choices.get(letter.lower())
+        return str(value).strip() if value is not None else None
+    if not isinstance(choices, list) or idx < 0 or idx >= len(choices):
+        return None
+    text = str(choices[idx]).strip()
+    prefix = f"{letter}."
+    if text.upper().startswith(prefix):
+        return text[len(prefix):].strip()
+    prefix = f"{letter})"
+    if text.upper().startswith(prefix):
+        return text[len(prefix):].strip()
+    return text
+
+
+def _answer_with_choice_aliases(answer: Any, choices: Any) -> Any:
+    if not isinstance(answer, str):
+        return answer
+    letter = answer.strip().upper()
+    choice_text = _choice_text_for_letter(choices, letter)
+    if not choice_text:
+        return answer
+    aliases = [choice_text, f"{letter}. {choice_text}", f"({letter}) {choice_text}"]
+    return {"answer": letter, "aliases": aliases}
+
+
 def load_vsi(cfg: dict) -> list[ProbeSample]:
     path = cfg.get("json_path") or cfg.get("jsonl_path") or cfg.get("path")
     if not path:
@@ -82,12 +113,13 @@ def load_vsi(cfg: dict) -> list[ProbeSample]:
             raise
 
         choices = _value(record, cfg, "choices")
+        answer = _answer_with_choice_aliases(_value(record, cfg, "answer"), choices)
         sample_id = str(_value(record, cfg, "id", default=f"vsi_{i:06d}"))
         out.append(ProbeSample(
             id=sample_id,
             image=image,
             question=_question_with_choices(str(_value(record, cfg, "question", default="")), choices),
-            answer=_value(record, cfg, "answer"),
+            answer=answer,
             raw=record,
             image_path=str(image_value),
             rationale=_value(record, cfg, "rationale"),
