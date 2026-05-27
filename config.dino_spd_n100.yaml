@@ -1,0 +1,91 @@
+models:
+  qwen2_5_vl_7b:
+    name: "Qwen2.5-VL-7B"
+    path: "./models/Qwen/Qwen2___5-VL-7B-Instruct"
+    arch: "qwen2_5_vl"
+    layer_path: null
+    image_pad_token: "<|image_pad|>"
+  qwen2_5_vl_3b:
+    name: "Qwen2.5-VL-3B"
+    path: "./models/Qwen/Qwen2___5-VL-3B-Instruct"
+    arch: "qwen2_5_vl"
+    layer_path: null
+    image_pad_token: "<|image_pad|>"
+  lvr_7b:
+    name: "LVR-7B"
+    path: "./models/LVR-7B"
+    arch: "lvr_qwen2_5_vl"
+    lvr_source_path: "../lvr"
+    layer_path: null
+    image_pad_token: "<|image_pad|>"
+    lvr_start_token: "<|lvr_start|>"
+    lvr_token: "<|lvr|>"
+    lvr_latent_end_token: "<|lvr_latent_end|>"
+    lvr_end_token: "<|lvr_end|>"
+audit:
+  mode: "standard_forward"
+  query_target: "auto"
+  max_image_side: 384
+  max_image_pixels: 147456
+model_aliases:
+  M0: qwen2_5_vl_7b
+  M0_small: qwen2_5_vl_3b
+  M2: lvr_7b
+data:
+  source_type: "spd_faith"
+  jsonl_path: "./data/spd_faith_hf/manifest.jsonl"
+  image_root: "./data/spd_faith_hf/images"
+  skip_missing_images: false
+  require_region_or_bbox: true
+  max_samples: 100
+  shuffle_seed: 260716
+  field_map:
+    id: ["id"]
+    paired_id: ["paired_id"]
+    image: ["image_clean"]
+    counterfactual_image: ["image_counterfactual"]
+    question: ["question"]
+    answer: ["gold_answer_clean", "answer"]
+    counterfactual_answer: ["gold_answer_counterfactual", "counterfactual_answer"]
+    rationale: ["rationale"]
+    region_mask: ["region_mask"]
+    bboxes: ["bboxes"]
+preregistration:
+  enabled: true
+  manifest_path: "prereg/manifest.yaml"
+inference:
+  dtype: "bfloat16"
+  device: "cuda:0"
+metrics:
+  pf_a_corruption_selectivity:
+    enabled: false
+  pf_b_patch_alignment:
+    enabled: true
+  bf_patch_answer_transfer:
+    enabled: false
+  bf_swap_latent_replacement:
+    enabled: false
+  bf_conf_calibrated_progression:
+    enabled: false
+  cf_stage_decay:
+    enabled: false
+pf_b:
+  seed: 260716
+  severity: 1.0
+  use_dino: true
+  dino_backend: "transformers"
+  dino_model: "facebook/dinov2-small"
+  dino_cache_dir: ".cache/dino_pf_b"
+  dino_device: "cpu"
+  dino_local_files_only: true
+validation:
+  run_sanity: true
+  fail_fast: true
+  v2:
+    min_samples: 80
+    min_pairs: 0
+    max_error_ratio: 0.2
+    allow_center_fallback: false
+output:
+  root: "./runs"
+  run_name: null

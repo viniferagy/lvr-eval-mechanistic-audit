@@ -1,22 +1,35 @@
 """PF-B native patch-alignment entry point."""
 from __future__ import annotations
 
+import logging
 import numpy as np
 
 from ... import internal_metrics as IM
 from ...corruptions import apply_mask, irrelevant_mask, random_mask, relevant_mask
+from .dino_backend import DinoBackendError, dino_alignment_for_masks
 from . import trace_latent as TL
 from ..base import MetricSpec
 
 
 METRIC_ID = "pf_b_patch_alignment"
 LEGACY_NAME = "pf_b"
+logger = logging.getLogger("lvr_eval.metrics.pf_b")
 
 
 def build_schema() -> dict:
     return {
         "metric_id": METRIC_ID,
-        "scalars": ["native_alignment", "relevant_alignment", "irrelevant_alignment", "random_alignment"],
+        "scalars": [
+            "native_alignment",
+            "relevant_alignment",
+            "irrelevant_alignment",
+            "random_alignment",
+            "dino_alignment",
+            "dino_relevant_alignment",
+            "dino_irrelevant_alignment",
+            "dino_random_alignment",
+            "dino_region_selectivity",
+        ],
         "external_backends": {"dino": "optional_not_required"},
         "status": "runnable_native_v0",
         "trace_latent_optional": True,
@@ -48,12 +61,48 @@ def _attention_alignment(wrapper, sample, mask, cfg: dict) -> dict:
     }
 
 
+def _masked_images(sample, rel, irr, rnd, local: dict) -> tuple:
+    fill = tuple(local.get("fill", [0, 0, 0]))
+    severity = float(local.get("severity", 1.0))
+    return (
+        apply_mask(sample.image, rel, fill=fill, severity=severity),
+        apply_mask(sample.image, irr, fill=fill, severity=severity),
+        apply_mask(sample.image, rnd, fill=fill, severity=severity),
+    )
+
+
+def _dino_unrequested() -> dict:
+    return {
+        "requested": False,
+        "available": False,
+        "reason": "optional_backend_not_configured",
+    }
+
+
+def _dino_not_available(reason: str) -> dict:
+    return {
+        "requested": True,
+        "available": False,
+        "reason": reason,
+    }
+
+
 def _aggregate(records: list[dict]) -> dict | None:
     valid = [r for r in records if r.get("native_alignment") is not None]
     if not valid:
         return None
     out = {}
-    for key in ("native_alignment", "relevant_alignment", "irrelevant_alignment", "random_alignment"):
+    for key in (
+        "native_alignment",
+        "relevant_alignment",
+        "irrelevant_alignment",
+        "random_alignment",
+        "dino_alignment",
+        "dino_relevant_alignment",
+        "dino_irrelevant_alignment",
+        "dino_random_alignment",
+        "dino_region_selectivity",
+    ):
         vals = [float(r[key]) for r in valid if r.get(key) is not None]
         out[key] = float(np.mean(vals)) if vals else None
     out["n"] = len(valid)
@@ -93,9 +142,19 @@ def _run_trace_latent(wrapper, samples, cfg: dict, model_tag: str) -> dict:
     local = _cfg(cfg)
     seed = int(local.get("seed", 0))
     use_dino = bool(local.get("use_dino", False))
+    mask_dilate_px = int(local.get("mask_dilate_px", 0))
+    progress_every = int(local.get("progress_every", 25))
     records = []
-    for sample in samples:
-        rel = relevant_mask(sample.image, bboxes=sample.bboxes, region_mask=sample.region_mask)
+    total = len(samples)
+    for idx, sample in enumerate(samples, start=1):
+        if progress_every > 0 and (idx == 1 or idx == total or idx % progress_every == 0):
+            logger.info("PF-B trace progress model=%s sample=%d/%d use_dino=%s", model_tag, idx, total, use_dino)
+        rel = relevant_mask(
+            sample.image,
+            bboxes=sample.bboxes,
+            region_mask=sample.region_mask,
+            dilate_px=mask_dilate_px,
+        )
         irr = irrelevant_mask(sample.image, rel, seed=seed)
         rnd = random_mask(sample.image, coverage=max(rel.coverage, 0.01), seed=seed)
         base = {
@@ -155,6 +214,7 @@ def _run_trace_latent(wrapper, samples, cfg: dict, model_tag: str) -> dict:
             "seed": seed,
             "use_dino": use_dino,
             "severity": local.get("severity", 1.0),
+            "mask_dilate_px": mask_dilate_px,
             "trace_latent": True,
             "distance": str(TL.cfg(cfg).get("distance", "l2")),
         },
@@ -170,9 +230,19 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
     local = _cfg(cfg)
     seed = int(local.get("seed", 0))
     use_dino = bool(local.get("use_dino", False))
+    mask_dilate_px = int(local.get("mask_dilate_px", 0))
+    progress_every = int(local.get("progress_every", 25))
     records = []
-    for sample in samples:
-        rel = relevant_mask(sample.image, bboxes=sample.bboxes, region_mask=sample.region_mask)
+    total = len(samples)
+    for idx, sample in enumerate(samples, start=1):
+        if progress_every > 0 and (idx == 1 or idx == total or idx % progress_every == 0):
+            logger.info("PF-B progress model=%s sample=%d/%d use_dino=%s", model_tag, idx, total, use_dino)
+        rel = relevant_mask(
+            sample.image,
+            bboxes=sample.bboxes,
+            region_mask=sample.region_mask,
+            dilate_px=mask_dilate_px,
+        )
         irr = irrelevant_mask(sample.image, rel, seed=seed)
         rnd = random_mask(sample.image, coverage=max(rel.coverage, 0.01), seed=seed)
         base = {
@@ -185,6 +255,7 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
             "random_oracle_source": rnd.oracle_source,
         }
         try:
+            rel_image, irr_image, rnd_image = _masked_images(sample, rel, irr, rnd, local)
             rel_meta = _attention_alignment(wrapper, sample, rel, cfg)
             irr_meta = _attention_alignment(wrapper, sample, irr, cfg)
             rnd_meta = _attention_alignment(wrapper, sample, rnd, cfg)
@@ -195,6 +266,28 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
                 "irrelevant_alignment": irr_meta["alignment"],
                 "random_alignment": rnd_meta["alignment"],
             }
+            if use_dino:
+                try:
+                    dino = dino_alignment_for_masks(
+                        clean_image=sample.image,
+                        relevant_image=rel_image,
+                        irrelevant_image=irr_image,
+                        random_image=rnd_image,
+                        cfg=cfg,
+                        local=local,
+                    )
+                    for key in (
+                        "dino_alignment",
+                        "dino_relevant_alignment",
+                        "dino_irrelevant_alignment",
+                        "dino_random_alignment",
+                        "dino_region_selectivity",
+                    ):
+                        reduction[key] = dino[key]
+                except DinoBackendError as exc:
+                    dino = _dino_not_available(str(exc))
+            else:
+                dino = _dino_unrequested()
             records.append({
                 **base,
                 **reduction,
@@ -204,11 +297,7 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
                 "query_target_kind": rel_meta.get("query_target_kind"),
                 "query_span": rel_meta.get("query_span"),
                 "image_span": rel_meta.get("image_span"),
-                "dino": {
-                    "requested": use_dino,
-                    "available": False,
-                    "reason": "optional_backend_not_configured" if not use_dino else "not_implemented_in_native_smoke",
-                },
+                "dino": dino,
                 "skip_reasons": {
                     "relevant": rel_meta.get("skip_reasons", {}),
                     "irrelevant": irr_meta.get("skip_reasons", {}),
@@ -222,7 +311,13 @@ def run(wrapper, samples, cfg: dict, model_tag: str) -> dict:
     return {
         "model": model_tag,
         "schema": build_schema(),
-        "config": {"seed": seed, "use_dino": use_dino, "severity": local.get("severity", 1.0)},
+        "config": {
+            "seed": seed,
+            "use_dino": use_dino,
+            "severity": local.get("severity", 1.0),
+            "mask_dilate_px": mask_dilate_px,
+            "progress_every": progress_every,
+        },
         "samples": records,
         "reduction": _aggregate(records),
     }

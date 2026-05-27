@@ -151,14 +151,23 @@ def check_pf_a_result(payload: dict, cfg: dict | None = None) -> dict:
 
 
 def check_pf_b_result(payload: dict, cfg: dict | None = None) -> dict:
+    use_dino = bool((payload.get("config") or {}).get("use_dino", False))
+    scalar_keys = ["native_alignment", "relevant_alignment", "irrelevant_alignment", "random_alignment"]
+    if use_dino:
+        scalar_keys.extend([
+            "dino_alignment",
+            "dino_relevant_alignment",
+            "dino_irrelevant_alignment",
+            "dino_random_alignment",
+            "dino_region_selectivity",
+        ])
     checks = _finite_reduction_checks(
         payload,
-        ["native_alignment", "relevant_alignment", "irrelevant_alignment", "random_alignment"],
+        scalar_keys,
     )
     reduction = payload.get("reduction") or {}
     checks.append(make_check("min_samples", PASS if int(reduction.get("n") or 0) >= _min_samples(cfg) else FAIL,
                              n=reduction.get("n"), min_samples=_min_samples(cfg)))
-    use_dino = bool((payload.get("config") or {}).get("use_dino", False))
     for record in payload.get("samples") or []:
         dino = record.get("dino") or {}
         checks.append(make_check(
