@@ -18,6 +18,7 @@ import copy
 import hashlib
 import os
 import json
+import sys
 import tempfile
 from types import SimpleNamespace
 from pathlib import Path
@@ -56,11 +57,13 @@ from pipeline.metrics.v2.monet_latent_patch_answer_transfer import (
     reduce_records as reduce_monet_latent_records,
 )
 from pipeline.metrics.v2.output_accuracy_sanity import run as run_output_accuracy_metric
+from pipeline.metrics.v2.output_accuracy_sanity import answer_hit
 from pipeline.metrics.v2.pf_b_patch_alignment import run as run_pf_b_metric
 from pipeline.metrics.v2 import trace_latent as TL
 from pipeline.metrics.lvr_generation_trace import run as run_lvr_trace_metric
 from pipeline.preregistration import build_lock_payload, hash_manifest, load_manifest
 from pipeline.results import make_metric_result
+from pipeline.stats.bf_usage_diagnostics import build_diagnostics
 from pipeline.stats.bootstrap import paired_bootstrap
 from pipeline.stats.mixed_effects import fit_mixed_effects
 from pipeline.degradation import curve_features
@@ -70,6 +73,7 @@ from pipeline import internal_metrics as IM
 from pipeline.sanity import (
     has_failed_checks,
     run_sanity_for_metric_result,
+    run_sanity_for_metric_results,
     run_sanity_suite,
     save_sanity_reports,
 )
@@ -80,7 +84,9 @@ from tools.build_findings_pack import main as build_findings_pack_main
 from tools.prepare_maze_planning_hf import main as prepare_maze_planning_hf_main
 from tools.prepare_blink_hf import main as prepare_blink_hf_main
 from tools.prepare_vstar_hf import main as prepare_vstar_hf_main
+from tools.prepare_vstar_local import main as prepare_vstar_local_main
 from tools.prepare_vsi_bench_hf import main as prepare_vsi_bench_hf_main
+from tools.prepare_vsi_visuals_hf import export_visuals as export_vsi_visuals
 from tools.prepare_monet_sft_hf import extract_prompt_answer, strip_latent_tokens
 from tools.validate_findings_gate import main as validate_findings_gate_main
 from tools.validate_main_matrix import main as validate_main_matrix_main
@@ -90,7 +96,9 @@ from tools.validate_trace_margin_quality import main as validate_trace_margin_qu
 from tools.validate_trace_latent_gate import main as validate_trace_latent_gate_main
 from tools.validate_w3_latent import main as validate_w3_latent_main
 from tools.validate_w4_stepsweep import main as validate_w4_stepsweep_main
+from tools.merge_vsi_accuracy import main as merge_vsi_accuracy_main
 from run_all import metric_enabled, selected_metric_ids
+from run_all import ProgressHeartbeat, metric_payload_summary, progress_interval_seconds
 
 
 def make_img(seed=0):
@@ -113,6 +121,29 @@ def test_corruption():
     assert np.array_equal(np.asarray(corrupt_image(img, "gaussian_blur", severity=0)), np.asarray(img.convert("RGB")))
     print("  连续 severity (mask=0.3, blur=15) -> ok")
     print("  severity=0 clean baseline -> ok")
+
+
+def test_progress_helpers():
+    print("\n== 1b. progress observability helpers ==")
+    import logging
+
+    logger = logging.getLogger("smoke.progress")
+    assert progress_interval_seconds({"runtime": {"progress_interval_seconds": 0}}) is None
+    assert progress_interval_seconds({"runtime": {"progress_interval_seconds": 3}}) == 3.0
+    payload = {
+        "reduction": {
+            "selectivity": 0.25,
+            "native_alignment": 0.9,
+            "ignored_text": "x",
+        },
+        "n": 4,
+        "n_error": 0,
+    }
+    summary = metric_payload_summary(payload)
+    assert "n=4" in summary and "n_error=0" in summary and "selectivity=0.25" in summary
+    with ProgressHeartbeat(logger, "smoke_short_operation", None):
+        pass
+    print("  run_all progress heartbeat config and payload summary -> ok")
 
 
 def test_spans():
@@ -446,6 +477,83 @@ def test_blink_vsi_loaders_and_prepare_fixtures():
     assert len(vsi) == 1
     assert vsi[0].image.size[0] >= 256
     assert "Choices:" in vsi[0].question
+    assert vsi[0].answer == "right"
+
+    visual_out = out_dir / "vsi_visuals"
+    visual_rows = [
+        {
+            "id": "vsi_scene_0",
+            "idx": 7,
+            "dataset": "arkitscenes",
+            "scene_name": "scene_000",
+            "image": make_img(seed=143),
+        },
+        {
+            "id": "vsi_scene_1",
+            "dataset": "scannet",
+            "scene_name": "scene_001",
+            "frames": [make_img(seed=144), make_img(seed=145), make_img(seed=146)],
+        },
+    ]
+    visual_stats = export_vsi_visuals(
+        visual_rows,
+        dataset="fixture/VSI",
+        split="test",
+        out_root=visual_out,
+        image_root=None,
+        thumb=64,
+        quality=90,
+    )
+    assert visual_stats["n_written"] == 2
+    assert (visual_out / "vsi_scene_0.jpg").is_file()
+    assert (visual_out / "arkitscenes" / "scene_000.jpg").is_file()
+    assert (visual_out / "scannet" / "scene_001.jpg").is_file()
+
+    lookup_raw = source / "vsi_lookup.json"
+    lookup_raw.write_text(json.dumps([
+        {
+            "id": "lookup0",
+            "dataset": "arkitscenes",
+            "scene_name": "scene_000",
+            "question": "Which room is shown?",
+            "options": ["kitchen", "garage"],
+            "ground_truth": "kitchen",
+        }
+    ]), encoding="utf-8")
+    lookup_out = out_dir / "vsi_lookup_prepared"
+    old_argv = sys.argv
+    try:
+        sys.argv = [
+            "prepare_vsi_bench_hf.py",
+            "--input-json", str(lookup_raw),
+            "--image-root", str(visual_out),
+            "--out", str(lookup_out),
+            "--max-samples", "1",
+        ]
+        prepare_vsi_bench_hf_main()
+    finally:
+        sys.argv = old_argv
+    lookup_stats = json.loads((lookup_out / "prepare_stats.json").read_text(encoding="utf-8"))
+    assert lookup_stats["n_written"] == 1
+    letter_manifest = out_dir / "vsi_letter_manifest.jsonl"
+    letter_manifest.write_text(json.dumps({
+        "id": "letter0",
+        "image": str(source / "vsi_0.png"),
+        "question": "Which object?",
+        "choices": ["A. table", "B. toilet", "C. door"],
+        "answer": "B",
+    }) + "\n", encoding="utf-8")
+    letter_samples = load_probe_set({
+        "source_type": "vsi",
+        "jsonl_path": str(letter_manifest),
+        "image_root": str(source),
+        "skip_missing_images": False,
+    })
+    assert letter_samples[0].answer["answer"] == "B"
+    assert "toilet" in letter_samples[0].answer["aliases"]
+    assert answer_hit("toilet", letter_samples[0].answer)
+    assert answer_hit("B. toilet", letter_samples[0].answer)
+    assert not answer_hit("table", letter_samples[0].answer)
     print("  BLINK/VSI prepare tools and loaders -> ok")
 
 
@@ -502,6 +610,68 @@ def test_vstar_loader_and_prepare_fixture():
     rel = relevant_mask(vstar[0].image, bboxes=vstar[0].bboxes)
     assert rel.oracle_source == "bbox" and rel.coverage > 0
     print("  V*Bench prepare tool, loader, bbox oracle, and high-res metadata -> ok")
+
+
+def test_vstar_snapshot_prepare_fixture():
+    print("\n== 4f. V*Bench snapshot JSON-bbox prepare path ==")
+    out_dir = Path(tempfile.mkdtemp(prefix="vstar_snapshot_fixture_"))
+    repo = out_dir / "repo"
+    direct = repo / "direct_attributes"
+    relative = repo / "relative_position"
+    direct.mkdir(parents=True)
+    relative.mkdir(parents=True)
+    for subdir, target_dir in (("direct_attributes", direct), ("relative_position", relative)):
+        image = Image.new("RGB", (1600, 1200), "white")
+        arr = np.asarray(image).copy()
+        arr[100:180, 240:320] = [0, 0, 255]
+        stem = f"sa_{subdir}_00000"
+        Image.fromarray(arr).save(target_dir / f"{stem}.jpg")
+        (target_dir / f"{stem}.json").write_text(json.dumps({
+            "target_object": ["blue square"],
+            "bbox": [[240, 100, 80, 80]],  # V*Bench xywh; preparer must convert.
+            "question": "What color is the target object?",
+            "options": ["blue", "red", "green", "yellow"],
+        }), encoding="utf-8")
+
+    prepared = out_dir / "prepared"
+    old_argv = sys.argv
+    try:
+        sys.argv = [
+            "prepare_vstar_local.py",
+            "--input-dir", str(repo),
+            "--out", str(prepared),
+            "--copy-images",
+            "--expected-min-samples", "2",
+        ]
+        prepare_vstar_local_main()
+    finally:
+        sys.argv = old_argv
+
+    stats = json.loads((prepared / "prepare_stats.json").read_text(encoding="utf-8"))
+    assert stats["n_written"] == 2
+    assert stats["per_category"]["attribute_recognition"] == 1
+    assert stats["per_category"]["spatial_relationship_reasoning"] == 1
+    assert stats["bbox_area_ratio"]["median"] > 0
+    first = json.loads((prepared / "manifest.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert first["bboxes"] == [[240.0, 100.0, 320.0, 180.0]]
+    assert first["answer"] == "A" and first["answer_text"] == "blue"
+
+    samples = load_probe_set({
+        "source_type": "vstar",
+        "jsonl_path": str(prepared / "manifest.jsonl"),
+        "image_root": str(prepared / "images"),
+        "skip_missing_images": False,
+        "require_bbox": True,
+    })
+    assert len(samples) == 2
+    assert all(s.bboxes and s.answer == "A" for s in samples)
+    assert "A. blue" in samples[0].question
+    rel = relevant_mask(samples[0].image, bboxes=samples[0].bboxes)
+    dilated = relevant_mask(samples[0].image, bboxes=samples[0].bboxes, dilate_px=32)
+    assert rel.oracle_source == "bbox"
+    assert dilated.oracle_source == "bbox_dilated_32px"
+    assert dilated.coverage > rel.coverage
+    print("  V*Bench full-repo snapshot prepare, xywh->xyxy bbox, and dilation -> ok")
 
 
 def test_image_resize_metadata():
@@ -1023,6 +1193,89 @@ def test_preregistration_and_bootstrap():
     print("  manifest hash/lock + bootstrap summary_with_ci -> ok")
 
 
+def test_bf_usage_diagnostics_fixture():
+    print("\n== 10c2. BF usage diagnostics ==")
+
+    def rec(idx, clean, shift, transfer, source="candidate_sequence_logprob"):
+        patched = clean + shift
+        return {
+            "id": f"s{idx}",
+            "paired_id": f"p{idx}",
+            "clean_margin": clean,
+            "patched_margin": patched,
+            "continuous_margin_shift": shift,
+            "logprob_margin_shift": shift,
+            "margin_source": source,
+            "clean_source_logprob": -2.0,
+            "clean_target_logprob": -2.0 - clean,
+            "patched_source_logprob": -2.0,
+            "patched_target_logprob": -2.0 - patched,
+            "answer_transferred": transfer,
+            "source_answer_token_ids": [1],
+            "target_answer_token_ids": [2],
+        }
+
+    patch_payload = {
+        "model": "fake",
+        "task": "spd_faith",
+        "cells": [{
+            "layer": 7,
+            "position_bucket": "query",
+            "records": [
+                rec(0, -0.05, 0.20, True),
+                rec(1, -0.20, -0.30, False),
+                rec(2, -0.80, 0.10, False, source="latent_logit_lens"),
+            ],
+        }],
+    }
+    swap_payload = {
+        "model": "fake",
+        "task": "spd_faith",
+        "cells": [{
+            "layer": 7,
+            "position_bucket": "query",
+            "records": [
+                rec(0, -0.05, 0.40, True),
+                rec(1, -0.20, 0.20, True),
+            ],
+        }],
+        "control_cells": [{
+            "layer": 7,
+            "position_bucket": "query",
+            "control": "random_pair_swap",
+            "records": [
+                rec(0, -0.05, 0.10, False),
+                rec(1, -0.20, -0.10, False),
+            ],
+        }],
+    }
+    diagnostics = build_diagnostics([
+        make_metric_result("bf_patch_answer_transfer", "fake", patch_payload, task="spd_faith"),
+        make_metric_result("bf_swap_latent_replacement", "fake", swap_payload, task="spd_faith"),
+    ])
+    patch_summary = next(
+        row for row in diagnostics["summaries"]
+        if row["metric_id"] == "bf_patch_answer_transfer"
+    )
+    assert patch_summary["n_shift"] == 3
+    assert abs(patch_summary["mean_signed_shift"] - 0.0) < 1e-9
+    assert patch_summary["mean_abs_shift"] > 0.19
+    assert abs(patch_summary["directional_accuracy"] - (2 / 3)) < 1e-9
+    assert patch_summary["agreement"]["transfer_yes_direction_correct"] == 1
+    bins = {row["boundary_bin"]: row for row in patch_summary["boundary_bins"]}
+    assert bins["near"]["n_shift"] == 1
+    assert bins["medium"]["n_shift"] == 1
+    assert bins["far"]["n_shift"] == 1
+    sources = {row["margin_source"]: row for row in patch_summary["margin_sources"]}
+    assert sources["candidate_sequence_logprob"]["n_shift"] == 2
+    assert sources["latent_logit_lens"]["n_shift"] == 1
+    control_rows = diagnostics["control_normalized_rows"]
+    assert len(control_rows) == 1
+    assert control_rows[0]["control"] == "random_pair_swap"
+    assert control_rows[0]["abs_shift_minus_control"] > 0
+    print("  BF usage diagnostics direction/abs/boundary/source/control -> ok")
+
+
 def test_v2_corruptions_and_patch_schema():
     print("\n== 10d. v2 corruption + BF-Patch schema fixtures ==")
     img = Image.new("RGB", (64, 64), color=(255, 255, 255))
@@ -1414,7 +1667,42 @@ def test_cf_stage_and_pf_b_fixtures():
     assert result["samples"][0]["dino"]["available"] is False
     assert result["samples"][0]["native_alignment"] is not None
     assert len(FakeInternal.calls) == 3
-    print("  CF-Stage stage reducer + PF-B native alignment fixture -> ok")
+
+    FakeInternal.calls = []
+    import pipeline.metrics.v2.pf_b_patch_alignment as pf_b_mod
+
+    old_im = pf_b_mod.IM
+    pf_b_mod.IM = FakeInternal
+    try:
+        dino_result = run_pf_b_metric(
+            None,
+            [sample],
+            {
+                "pf_b": {
+                    "seed": 3,
+                    "use_dino": True,
+                    "dino_backend": "mock",
+                },
+                "validation": {"v2": {"min_samples": 1}},
+            },
+            "fake",
+        )
+    finally:
+        pf_b_mod.IM = old_im
+
+    dino_sample = dino_result["samples"][0]
+    assert dino_sample["dino"]["available"] is True
+    assert dino_sample["dino"]["backend"] == "mock"
+    assert dino_result["reduction"]["dino_alignment"] is not None
+    assert dino_result["reduction"]["dino_region_selectivity"] is not None
+    summary_rows = build_summary_with_ci([make_metric_result("pf_b_patch_alignment", "fake", dino_result)])
+    assert any(row["scalar"] == "dino_region_selectivity" for row in summary_rows)
+    sanity = run_sanity_for_metric_results(
+        [make_metric_result("pf_b_patch_alignment", "fake", dino_result)],
+        {"validation": {"v2": {"min_samples": 1}}},
+    )
+    assert not has_failed_checks(sanity), sanity
+    print("  CF-Stage stage reducer + PF-B native and mock-DINO alignment fixture -> ok")
 
 
 def test_v2_sanity_and_validator_fixtures():
@@ -2519,6 +2807,13 @@ def test_output_accuracy_and_main_matrix_fixtures():
     }
     payload = run_output_accuracy_metric(TinyAccuracyWrapper(), [sample], cfg, "qwen2_5_vl_3b")
     assert payload["reduction"]["accuracy"] == 1.0
+    assert payload["reduction"]["n_total"] == 1
+    assert answer_hit("about 12.4 meters", {"numeric_value": 12.5, "abs_tolerance": 0.2})
+    assert not answer_hit("about 12.0 meters", {"numeric_value": 12.5, "abs_tolerance": 0.2})
+    assert answer_hit("Answer: A", "A")
+    assert answer_hit("(B) chair", "B")
+    assert not answer_hit("D. pillow", "A")
+    assert not answer_hit("The answer appears to be pillow.", "A")
     reports = run_sanity_for_metric_result("output_accuracy_sanity", payload, cfg)
     assert reports and not has_failed_checks(reports)
 
@@ -2604,15 +2899,54 @@ def test_output_accuracy_and_main_matrix_fixtures():
     validate_main_paper_readiness_main([str(merged), "--mode", "full_main_matrix"])
 
     acc_root = Path(tempfile.mkdtemp(prefix="accuracy_matrix_fixture_"))
-    acc_run = acc_root / "vsi_qwen2_5_vl_3b"
-    (acc_run / "metrics").mkdir(parents=True)
-    (acc_run / "config_snapshot.yaml").write_text(yaml.safe_dump({"data": {"source_type": "vsi"}}), encoding="utf-8")
-    acc_env = make_metric_result("output_accuracy_sanity", "qwen2_5_vl_3b", payload)
-    (acc_run / "metrics" / "output_accuracy_sanity_qwen2_5_vl_3b.json").write_text(
-        json.dumps(acc_env, indent=2),
+    for model in models:
+        acc_run = acc_root / f"vsi_{model}"
+        (acc_run / "metrics").mkdir(parents=True)
+        (acc_run / "config_snapshot.yaml").write_text(yaml.safe_dump({"data": {"source_type": "vsi"}}), encoding="utf-8")
+        model_payload = copy.deepcopy(payload)
+        model_payload["model"] = model
+        acc_env = make_metric_result("output_accuracy_sanity", model, model_payload, task="vsi")
+        (acc_run / "metrics" / f"output_accuracy_sanity_{model}.json").write_text(
+            json.dumps(acc_env, indent=2),
+            encoding="utf-8",
+        )
+    validate_main_matrix_main([str(acc_root), "--accuracy-only", "--min-samples", "1"])
+    acc_merged = acc_root / "merged"
+    merge_vsi_accuracy_main([str(acc_root), "--out", str(acc_merged), "--min-samples", "1"])
+    assert (acc_merged / "vsi_accuracy_summary.json").is_file()
+    duplicate_root = acc_root / "duplicate_lvr_failed"
+    (duplicate_root / "metrics").mkdir(parents=True)
+    failed_payload = copy.deepcopy(payload)
+    failed_payload["model"] = "lvr_7b"
+    failed_payload["samples"] = [
+        {"id": "failed", "answer": "A", "error": "RuntimeError('old failure')"}
+    ]
+    failed_payload["reduction"] = {"accuracy": None, "n": 0, "n_total": 1, "n_error": 1}
+    failed_env = make_metric_result("output_accuracy_sanity", "lvr_7b", failed_payload, task="vsi")
+    (duplicate_root / "metrics" / "output_accuracy_sanity_lvr_7b.json").write_text(
+        json.dumps(failed_env, indent=2),
         encoding="utf-8",
     )
-    validate_main_matrix_main([str(acc_root), "--accuracy-only", "--min-samples", "1"])
+    acc_merged_dupes = acc_root / "merged_dupes"
+    merge_vsi_accuracy_main([
+        str(acc_root),
+        str(duplicate_root),
+        "--out", str(acc_merged_dupes),
+        "--min-samples", "1",
+    ])
+    duplicate_summary = json.loads((acc_merged_dupes / "vsi_accuracy_summary.json").read_text(encoding="utf-8"))
+    assert duplicate_summary["models"]["lvr_7b"]["n_samples"] >= 1
+    assert duplicate_summary["skipped_duplicate_candidates"]
+    for env in metric_results:
+        metric_path = merged / "metrics" / f"{env['task']}_{env['metric_id']}_{env['model']}.json"
+        metric_path.parent.mkdir(exist_ok=True)
+        metric_path.write_text(json.dumps(env, indent=2), encoding="utf-8")
+    validate_main_paper_readiness_main([
+        str(merged),
+        "--mode", "paper_ready",
+        "--t4-accuracy-summary", str(acc_merged / "vsi_accuracy_summary.json"),
+        "--t4-min-samples", "1",
+    ])
 
     dry = os.popen(
         "bash tools/launch_main_matrix.sh --configs config.main_maze_n1000.yaml "
@@ -2712,6 +3046,7 @@ def test_end_to_end():
 
 def main():
     test_corruption()
+    test_progress_helpers()
     test_spans()
     test_reductions()
     test_data_field_mapping()
@@ -2719,6 +3054,7 @@ def main():
     test_prepare_maze_planning_fixture()
     test_blink_vsi_loaders_and_prepare_fixtures()
     test_vstar_loader_and_prepare_fixture()
+    test_vstar_snapshot_prepare_fixture()
     test_image_resize_metadata()
     test_pf3_corrupt_after_resize()
     test_lvr_json_loader()
@@ -2729,6 +3065,7 @@ def main():
     test_trace_recorder_fake_model()
     test_trace_recorder_tensor_capture_and_patch()
     test_preregistration_and_bootstrap()
+    test_bf_usage_diagnostics_fixture()
     test_v2_corruptions_and_patch_schema()
     test_pf_a_metric_fixture()
     test_bf_patch_metric_fixture()
